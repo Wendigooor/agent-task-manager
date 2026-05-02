@@ -1,7 +1,7 @@
 import sqlite3, os, sys
 from datetime import datetime, timezone
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plans.db")
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plans.db")
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
