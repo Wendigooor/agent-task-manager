@@ -1,0 +1,32 @@
+============================================================
+  AGENT TASK MANAGER — Database Log
+============================================================
+
+📦 MILESTONES (4)
+  🟡 [active    ] init                 phase=setup | Project Initialization
+  🟡 [active    ] phase1-core          phase=phase1 | Phase 1: Core Engine
+  ⏳ [planned   ] phase2-delivery      phase=phase2 | Phase 2: Delivery
+  ⏳ [planned   ] phase3-output        phase=phase3 | Phase 3: Output
+
+📋 WORK ITEMS (8)
+
+  ▸ init (active)
+    ⬜ #1 setup-repo [todo        ] Initialize repository structure
+    ⬜ #2 setup-ci   [todo        ] Configure CI pipeline
+
+  ▸ phase1-core (active)
+    ✅ #3 TW-001     [done        ] Browser cookie extractor [@agent]
+       └ 2026-05-02T14:46 [progress] Analyzed Chrome cookie storage. Keychain decryption for auth_token.
+       └ 2026-05-02T14:46 [progress] Implemented cookie extractor: reads SQLite cookies DB, decrypts via keyring, exports JSON.
+    ⬜ #4 TW-002     [todo        ] Timeline fetcher via GraphQL
+    ⬜ #5 TW-003     [todo        ] Noise filter
+
+  ▸ phase2-delivery (planned)
+    ⬜ #6 TW-004     [todo        ] LLM summarizer
+
+  ▸ phase3-output (planned)
+    ⬜ #7 TW-005     [todo        ] Terminal output
+    ⬜ #8 TW-006     [todo        ] Telegram bot delivery
+
+📊 SUMMARY: 1 done, 7 todo
+   Phases: phase1, phase2, phase3, setup

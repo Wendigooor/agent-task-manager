@@ -51,12 +51,12 @@ A **SQLite database** that is the single source of truth for all tasks. The AI d
 
 The AI will:
 1. Read README.md to understand the rules
-2. Call `python3 read_agent.py phases` to see all phases
-3. Call `python3 read_agent.py next` to get the next task
-4. Call `python3 read_agent.py context <id>` to load task details
-5. Call `python3 workitem_agent.py claim <id>` to claim the task
+2. Call `python3 src/read_agent.py phases` to see all phases
+3. Call `python3 src/read_agent.py next` to get the next task
+4. Call `python3 src/read_agent.py context <id>` to load task details
+5. Call `python3 src/workitem_agent.py claim <id>` to claim the task
 6. Write code
-7. Call `python3 workitem_agent.py update-status <id> --status done` to complete
+7. Call `python3 src/workitem_agent.py update-status <id> --status done` to complete
 
 ## The Key Principle: Determinism Over Prompts
 
@@ -83,13 +83,14 @@ Python code enforces the rules. Prompts don't.
 
 ## File Summary
 
-| File | Purpose | AI Access |
-|------|---------|-----------|
-| `README.md` | Constitution: rules, stack, CLI cheat-sheet | Read |
-| `read_agent.py` | List phases, milestones, tasks, get context | Read |
-| `workitem_agent.py` | Create, claim, log, update task status | Read+Write |
-| `status_agent.py` | Validate status transitions | Read+Write |
-| `milestone_agent.py` | Create, activate, complete milestones | Read+Write |
-| `taskboard.py` | ORM layer (typed SQLite helpers) | None (API only) |
-| `memory.py` | DB connection | None (internal) |
-| `plans.db` | SQLite database | Via scripts only |
+| File | Purpose |
+|------|---------|
+| `README.md` | Constitution: rules, stack, CLI cheat-sheet |
+| `src/read_agent.py` | List phases, milestones, tasks, get context |
+| `src/workitem_agent.py` | Create, claim, log, update task status |
+| `src/status_agent.py` | Validate status transitions |
+| `src/milestone_agent.py` | Create, activate, complete milestones |
+| `src/taskboard.py` | ORM layer (typed SQLite helpers) |
+| `src/memory.py` | DB connection |
+| `src/db_log.py` | Readable dump of everything in the database |
+| `plans.db` | SQLite database (via scripts only) |

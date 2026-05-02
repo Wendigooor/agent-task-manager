@@ -138,19 +138,22 @@ Pipeline:
 ## Minimal V2 Implementation
 
 ```
-framework-v2/
+agent-task-manager-v2/
 ├── README.md              # Constitution (shared across all services)
-├── memory.py              # DB + services config
-├── taskboard.py           # ORM: tasks, milestones, AC, deps, inbox
-├── read_agent.py          # read-only
-├── workitem_agent.py      # CRUD
-├── status_agent.py        # state machine
-├── milestone_agent.py     # milestones
-├── discovery_agent.py     # NEW: code analysis before planning
-├── inbox_agent.py         # NEW: parsing incoming ideas
-├── mcp_server.py          # NEW: MCP server (FastMCP)
-├── plans.db
-└── services.json          # Service list and configs
+├── .gitignore
+├── plans.db               # SQLite database
+├── services.json          # Service list and configs
+├── src/
+│   ├── memory.py          # DB connection + services config loader
+│   ├── taskboard.py       # ORM: tasks, milestones, AC, deps, inbox
+│   ├── read_agent.py      # Read-only
+│   ├── workitem_agent.py  # CRUD
+│   ├── status_agent.py    # State machine
+│   ├── milestone_agent.py # Milestones
+│   ├── db_log.py          # Readable DB dump
+│   ├── discovery_agent.py # NEW: code analysis before planning
+│   ├── inbox_agent.py     # NEW: parsing incoming ideas
+│   └── mcp_server.py      # NEW: MCP server (FastMCP)
 ```
 
 ## Summary: What to Simplify, What to Add
