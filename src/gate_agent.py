@@ -7,7 +7,7 @@ from gateboard import *
 
 def main():
     parser = argparse.ArgumentParser(description="ATM Gate Agent — Lightweight Gate Runner")
-    parser.add_argument("command", choices=["init-run", "import-gates", "next", "start", "pass", "fail", "block", "run", "evidence", "status", "verify", "verdict", "export"])
+    parser.add_argument("command", choices=["init-run", "import-gates", "next", "start", "pass", "fail", "block", "run", "evidence", "status", "verify", "verify-integrity", "verdict", "export"])
     parser.add_argument("--id", help="Run ID")
     parser.add_argument("--profile", default="demo", help="Gate profile (demo, feature, patch, benchmark)")
     parser.add_argument("--contract", help="Path to contract file")
@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=300, help="Command timeout in seconds")
     parser.add_argument("--out", default=None, help="Output directory for export")
     parser.add_argument("--json", action="store_true", help="JSON output")
+    parser.add_argument("remainder", nargs=argparse.REMAINDER, help="Remaining arguments (for `run` subcommand command)")
 
     args = parser.parse_args()
 
@@ -62,10 +63,13 @@ def main():
             result = cmd_block(args.id or _latest_run(), args.gate, args.reason)
 
     elif args.command == "run":
-        if not args.gate or not args.command:
-            result = {"error": "--gate and --command are required"}
+        if not args.gate:
+            result = {"error": "--gate is required"}
+        elif not args.command and not args.remainder:
+            result = {"error": "command is required (use --command or --)"}
         else:
-            result = cmd_run(args.id or _latest_run(), args.gate, args.command, args.timeout)
+            cmd = args.command or " ".join(args.remainder) if hasattr(args, 'remainder') and args.remainder else args.command
+            result = cmd_run(args.id or _latest_run(), args.gate, cmd, args.timeout)
 
     elif args.command == "evidence":
         if not args.gate:
@@ -80,10 +84,14 @@ def main():
 
     elif args.command == "verify":
         result = cmd_verify(args.id)
+    elif args.command == "verify-integrity":
+        result = cmd_verify_integrity(args.id)
 
     elif args.command == "verdict":
         result = cmd_verdict(args.id)
 
+    elif args.command == "doctor":
+        result = cmd_doctor()
     elif args.command == "export":
         if not args.out:
             result = {"error": "--out is required"}

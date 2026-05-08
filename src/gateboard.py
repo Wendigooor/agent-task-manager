@@ -223,6 +223,10 @@ def cmd_pass(run_id, gate_id, evidence_path=None, note=None):
     if evidence_path and not os.path.exists(evidence_path):
         return {"error": f"Evidence file '{evidence_path}' not found"}
 
+    # Visual review gate requires file evidence, not just a note
+    if gate_id and "visual" in gate_id and not evidence_path and kind == "manual":
+        return {"error": f"Gate '{gate_id}' requires file evidence (screenshot or visual-review.md). Notes alone are not sufficient."}
+
     sha = _sha256(evidence_path) if evidence_path else None
     conn.execute("UPDATE gates SET status = 'passed', updated_at = ? WHERE run_id = ? AND id = ?", [now(), run_id, gate_id])
     _event(conn, run_id, gate_id, "passed", {"evidence": evidence_path, "note": note})
@@ -310,7 +314,8 @@ def cmd_status(run_id=None):
         "gates_list": {k: v for k, v in by_status.items()}
     }
 
-def cmd_verify(run_id=None):
+def cmd_verify_integrity(run_id=None):
+    """Check for contradictions in the gate ledger. Returns PASS/FAIL."""
     conn = _ensure_db()
     if not run_id:
         r = conn.execute("SELECT id FROM runs WHERE status = 'active' ORDER BY created_at DESC LIMIT 1").fetchone()
@@ -320,28 +325,31 @@ def cmd_verify(run_id=None):
 
     issues = []
     gates = conn.execute("SELECT id, status, kind, spec_json FROM gates WHERE run_id = ?", [run_id]).fetchall()
+    export_path = os.path.join(DB_DIR, "..", "evidence", run_id, "atm-export.json")
 
     for gid, status, kind, spec_json in gates:
         spec = json.loads(spec_json) if spec_json else {}
         ev = conn.execute("SELECT COUNT(*) FROM evidence_refs WHERE run_id = ? AND gate_id = ?", [run_id, gid]).fetchone()[0]
 
-        # Passed but no evidence
         if status == "passed" and ev == 0 and kind not in ("command", "composite"):
             issues.append({"gate": gid, "issue": "passed_without_evidence"})
 
-        # Command passed without command_run
         if status == "passed" and kind == "command":
             cr = conn.execute("SELECT COUNT(*) FROM command_runs WHERE run_id = ? AND gate_id = ? AND exit_code = 0", [run_id, gid]).fetchone()[0]
             if cr == 0:
                 issues.append({"gate": gid, "issue": "command_passed_without_successful_run"})
 
-        # File exists check
-        if kind == "file_exists" and status == "passed":
+        if kind in ("file_exists", "file_exists_or_note") and status == "passed":
             for p in spec.get("paths", []):
                 if not os.path.exists(p):
                     issues.append({"gate": gid, "issue": f"required_file_missing: {p}"})
 
-    # Contradiction: verdict says done but critical gates not passed
+        # Check attached evidence files exist
+        ev_files = conn.execute("SELECT path FROM evidence_refs WHERE run_id = ? AND gate_id = ? AND evidence_type = 'file' AND path IS NOT NULL", [run_id, gid]).fetchall()
+        for (ev_path,) in ev_files:
+            if not os.path.exists(ev_path):
+                issues.append({"gate": gid, "issue": f"evidence_file_missing: {ev_path}"})
+
     run = conn.execute("SELECT verdict FROM runs WHERE id = ?", [run_id]).fetchone()
     if run and run[0] in ("demo_done",):
         critical_pending = conn.execute("SELECT COUNT(*) FROM gates WHERE run_id = ? AND severity = 'critical' AND status != 'passed'", [run_id]).fetchone()[0]
@@ -349,6 +357,9 @@ def cmd_verify(run_id=None):
             issues.append({"gate": "run", "issue": f"verdict_demo_done_but_{critical_pending}_critical_gates_not_passed"})
 
     return {"run_id": run_id, "issues": issues, "pass": len(issues) == 0}
+
+# Keep cmd_verify as alias for backward compatibility
+cmd_verify = cmd_verify_integrity
 
 def cmd_verdict(run_id=None):
     conn = _ensure_db()
@@ -394,6 +405,39 @@ def cmd_verdict(run_id=None):
     conn.commit()
 
     return {"verdict": verdict, "run_id": run_id, "reason": reason, "summary": {"critical_failed": critical_failed, "critical_pending": critical_pending, "major_failed": major_failed, "passed": all_passed, "total": total}}
+
+
+def cmd_doctor():
+    """Check ATM environment health."""
+    issues = []
+    # Check bin/atm
+    bin_path = os.path.join(os.path.dirname(__file__) if "__file__" in dir() else ".", "..", "bin", "atm")
+    if not os.path.exists(bin_path):
+        issues.append("bin/atm not found")
+    
+    # Check DB writable
+    try:
+        conn = _ensure_db()
+        conn.execute("SELECT 1 FROM runs LIMIT 1")
+        conn.close()
+    except Exception as e:
+        issues.append(f"DB not accessible: {e}")
+    
+    # Check profiles dir
+    profiles_dir = os.path.join(os.path.dirname(DB_DIR), "profiles")
+    if os.path.exists(profiles_dir):
+        profiles = [f for f in os.listdir(profiles_dir) if f.endswith(".yaml") or f.endswith(".yml")]
+    else:
+        profiles = ["built-in (demo)"]
+    
+    return {
+        "status": "healthy" if not issues else "issues_found",
+        "bin_atm": "exists" if os.path.exists(bin_path) else "missing",
+        "db": "writable" if os.access(DB_DIR, os.W_OK) else "readonly",
+        "db_path": DB_PATH,
+        "profiles": profiles,
+        "issues": issues
+    }
 
 def cmd_export(run_id, output_dir):
     conn = _ensure_db()

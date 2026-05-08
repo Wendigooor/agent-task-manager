@@ -134,7 +134,28 @@ r = cmd_block("test-run", "gate.e2e.demo", "E2E cannot run")
 test("block sets blocked", r.get("status") == "blocked")
 test("block has reason", r.get("reason") == "E2E cannot run")
 
-# ── Summary ──
+# ── Doctor ──
+print("\n=== DOCTOR ===")
+r = cmd_doctor()
+test("doctor returns status", isinstance(r.get("status"), str))
+test("doctor has db_path", "db_path" in r and r["db_path"])
+
+# ── Visual Review Gate (must reject note-only) ──
+print("\n=== VISUAL REVIEW GATE ===")
+# First pass a normal manual gate with note (should work)
+r = cmd_pass("test-run", "gate.discovery.api", note="API tested via curl")
+test("normal manual gate passes with note", r.get("status") == "passed")
+
+# Now try to pass visual.review with only note (should fail)
+r = cmd_pass("test-run", "gate.visual.review", note="Screenshots look good")
+test("visual.review rejects note-only", "error" in r and "file evidence" in r.get("error", ""))
+
+# Pass with file (should work)
+vf = "/tmp/visual-review-test.md"
+with open(vf, "w") as f: f.write("# Visual review: screenshots look premium")
+r = cmd_pass("test-run", "gate.visual.review", evidence_path=vf)
+test("visual.review passes with file", r.get("status") == "passed")
+os.remove(vf)
 print(f"\n{'='*40}")
 print(f"RESULTS: {passed} passed, {failed} failed")
 print(f"{'='*40}")

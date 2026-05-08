@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 # ATM — Agent Task Manager Gate Runner CLI
 set -e
-DIR="$(cd "$(dirname "$0")" && pwd)"
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
 exec python3 "$DIR/src/gate_agent.py" "$@"
