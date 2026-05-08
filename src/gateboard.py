@@ -602,10 +602,11 @@ def cmd_audit(run_id=None, summary_path=None):
         spec = info.get("spec", {})
         if info["status"] == "passed" and info["kind"] in ("file_exists", "file_exists_or_note"):
             for p in spec.get("paths", []):
-                # Resolve <run-id>
+                # Resolve <run-id> and prepend PROJECT_ROOT
                 p_resolved = p.replace("<run-id>", run_id) if "<run-id>" in p else p
-                if not os.path.exists(p_resolved):
-                    issues.append({"type": "evidence_file_missing", "detail": f"gate {gid}: required file {p_resolved} not found", "severity": "critical", "gate": gid})
+                full_path = os.path.join(PROJECT_ROOT, p_resolved) if not os.path.isabs(p_resolved) else p_resolved
+                if not os.path.exists(full_path):
+                    issues.append({"type": "evidence_file_missing", "detail": f"gate {gid}: required file {full_path} not found", "severity": "critical", "gate": gid})
 
     # 6. Evidence refs: attached files that don't exist
     ev_files = conn.execute("SELECT gate_id, path FROM evidence_refs WHERE run_id = ? AND evidence_type = 'file' AND path IS NOT NULL", [run_id]).fetchall()
