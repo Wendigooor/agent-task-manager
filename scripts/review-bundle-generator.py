@@ -255,9 +255,10 @@ if __name__ == "__main__":
     old_root = os.environ.pop("ATM_PROJECT_ROOT", None)
     old_dir = os.environ.pop("ATM_DB_DIR", None)
 
-    build_bundle(args.id, args.project_root, atm_bin)
-
-    # Restore (don't pollute caller's env)
-    if old_path: os.environ["ATM_DB_PATH"] = old_path
-    if old_root: os.environ["ATM_PROJECT_ROOT"] = old_root
-    if old_dir: os.environ["ATM_DB_DIR"] = old_dir
+    try:
+        build_bundle(args.id, args.project_root, atm_bin)
+    finally:
+        # Always restore env vars, even on crash/exit(1)
+        if old_path: os.environ["ATM_DB_PATH"] = old_path
+        if old_root: os.environ["ATM_PROJECT_ROOT"] = old_root
+        if old_dir: os.environ["ATM_DB_DIR"] = old_dir
