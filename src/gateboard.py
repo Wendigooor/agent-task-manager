@@ -439,8 +439,12 @@ def cmd_doctor():
     issues = []
     # Check bin/atm relative to project root
     bin_path = os.path.join(PROJECT_ROOT, "bin", "atm")
+    # In project-wrapper mode, ATM source is external — don't require bin/atm in project
+    is_wrapper = "ATM_PROJECT_ROOT" in os.environ and os.environ.get("ATM_PROJECT_ROOT") != os.path.dirname(PROJECT_ROOT)
     if os.path.exists(bin_path):
         bin_status = "exists"
+    elif is_wrapper:
+        bin_status = "external (scripts/atm)"
     else:
         bin_status = "missing"
         issues.append(f"bin/atm not found at {bin_path}")
@@ -470,7 +474,7 @@ def cmd_doctor():
     }
 
 
-def _cmd_smoke(run_id, args=None):
+def cmd_smoke(run_id, args=None):
     """Quick smoke test: doctor → init → import → run → verify → verdict."""
     import tempfile, os, json
     results = []
