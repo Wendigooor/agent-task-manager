@@ -113,15 +113,52 @@ def build_bundle(run_id: str, project_root: str, atm_bin: str):
             manifest["source/index.ts (route registration)"] = "✅"
             break
 
-    # Copy changed source files
+    # Copy changed source files — search recursively under project_root
     for cf in changed_files:
+        name = os.path.basename(cf)
+        dst = os.path.join(src_dir, name)
+        if os.path.exists(dst):
+            continue  # already copied
+        # Try direct path first
         cf_src = os.path.join(project_root, cf)
         if os.path.exists(cf_src):
-            name = os.path.basename(cf)
-            dst = os.path.join(src_dir, name)
-            if not os.path.exists(dst):
-                shutil.copy2(cf_src, dst)
-                manifest[f"source/{name}"] = "✅"
+            shutil.copy2(cf_src, dst)
+            manifest[f"source/{name}"] = "✅"
+            continue
+        # Search recursively (changed-files paths may be relative to subdir)
+        matches = glob.glob(os.path.join(project_root, "**", cf), recursive=True)
+        if matches:
+            shutil.copy2(matches[0], dst)
+            manifest[f"source/{name}"] = "✅ (found via search)"
+            continue
+        # Fallback: try just the filename anywhere
+        matches = glob.glob(os.path.join(project_root, "**", name), recursive=True)
+        if matches:
+            shutil.copy2(matches[0], dst)
+            manifest[f"source/{name}"] = "✅ (found via basename search)"
+            continue
+        manifest[f"source/{name}"] = "❌ NOT FOUND: " + cf
+
+    # If no source files were copied, try git
+    if not any(k.startswith("source/") and ("✅" in v or "found" in v) for k, v in manifest.items()):
+        try:
+            git_files = subprocess.run(
+                ["git", "diff", "--name-only", "HEAD~1..HEAD"],
+                capture_output=True, text=True, timeout=10, cwd=project_root
+            )
+            if git_files.returncode == 0 and git_files.stdout.strip():
+                for gf in git_files.stdout.strip().split("\n"):
+                    if not gf.strip():
+                        continue
+                    name = os.path.basename(gf)
+                    dst = os.path.join(src_dir, name)
+                    if os.path.exists(dst):
+                        continue
+                    if os.path.exists(os.path.join(project_root, gf)):
+                        shutil.copy2(os.path.join(project_root, gf), dst)
+                        manifest[f"source/{name}"] = "✅ (from git diff)"
+        except Exception:
+            pass
 
     # Reports
     for rpt_file in glob.glob(os.path.join(ev, "*-report.json")):
@@ -149,8 +186,10 @@ def build_bundle(run_id: str, project_root: str, atm_bin: str):
     else:
         manifest["known-limitations.md"] = "❌ MISSING"
 
-    # Freshness check against project-root git, NOT script's repo
+    # Freshness check — compare current generation time vs latest git commit
+    # (Do NOT compare against REVIEW_BUNDLE_MANIFEST.md timestamp — it gets overwritten)
     freshness_issues = []
+    now = datetime.datetime.now()
     try:
         last_commit = subprocess.run(
             ["git", "log", "-1", "--format=%ct"],
@@ -159,9 +198,8 @@ def build_bundle(run_id: str, project_root: str, atm_bin: str):
         if last_commit.returncode == 0 and last_commit.stdout.strip():
             commit_ts = int(last_commit.stdout.strip())
             commit_dt = datetime.datetime.fromtimestamp(commit_ts)
-            bundle_dt = datetime.datetime.fromtimestamp(os.path.getmtime(os.path.join(bundle, "REVIEW_BUNDLE_MANIFEST.md")))
-            if bundle_dt < commit_dt:
-                freshness_issues.append(f"Bundle generated {bundle_dt.isoformat()} before last commit {commit_dt.isoformat()}")
+            if now < commit_dt:
+                freshness_issues.append(f"Current time {now.isoformat()} before commit {commit_dt.isoformat()}")
     except Exception:
         freshness_issues.append("Could not verify freshness (git unavailable)")
 
