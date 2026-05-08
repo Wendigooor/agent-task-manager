@@ -68,7 +68,7 @@ def main():
     sp.add_argument("--gate", required=True); sp.add_argument("--file"); sp.add_argument("--note")
 
     # status / verify / verify-integrity / verdict / doctor / smoke / export
-    for cmd in ("status", "verify", "verify-integrity", "verdict", "smoke"):
+    for cmd in ("status", "verify", "verify-integrity", "verdict", "audit", "smoke"):
         _sp(cmd, None)
 
     # export
@@ -94,6 +94,7 @@ def main():
             "status": lambda: cmd_status(rid),
             "verify": lambda: cmd_verify_integrity(rid),
             "verify-integrity": lambda: cmd_verify_integrity(rid),
+            "audit": lambda: cmd_audit(rid),
             "verdict": lambda: cmd_verdict(rid),
             "export": lambda: cmd_export(rid, args.out),
             "doctor": cmd_doctor,
@@ -124,6 +125,16 @@ def _human(cmd, r):
         for ok, name, msg in r.get("steps", []):
             print(f"  {'✅' if ok else '❌'} {name}: {msg}")
         print(f"\nOverall: {'PASS' if r.get('pass') else 'FAIL'}")
+
+    elif cmd == "audit":
+        print(f"AUDIT: {r.get('run_id')}")
+        print(f"  Verdict: {r.get('verdict')} | Gates: {r.get('passed_gates')}/{r.get('gate_count')} passed")
+        print(f"  Issues: {r.get('critical_issues')} critical, {r.get('major_issues')} major")
+        for i in r.get("issues", []):
+            print(f"  {'🔴' if i.get('severity')=='critical' else '🟡'} [{i.get('severity')}] {i.get('detail')}")
+        for w in r.get("warnings", []):
+            print(f"  ⓘ {w.get('detail')}")
+        print(f"\n  Audit: {'PASS ✅' if r.get('pass') else 'FAIL ❌'}")
     elif cmd == "verdict":
         print(f"Verdict: {r.get('verdict')} — {r.get('reason')}")
         s = r.get("summary", {})

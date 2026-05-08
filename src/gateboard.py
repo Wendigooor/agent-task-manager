@@ -554,6 +554,103 @@ def cmd_smoke(run_id, args=None):
         else: os.environ.pop("ATM_DB_DIR", None)
 
 
+
+def cmd_audit(run_id=None, summary_path=None):
+    """Contradiction detector: checks summary.md claims against ATM state and evidence files."""
+    conn = _ensure_db()
+    if not run_id:
+        r = conn.execute("SELECT id FROM runs WHERE status = 'active' ORDER BY created_at DESC LIMIT 1").fetchone()
+        if not r: return {"error": "No active run"}
+        run_id = r[0]
+
+    issues = []
+    details = []
+
+    # Load gates
+    gates = {g[0]: {"status": g[1], "kind": g[2], "spec": json.loads(g[3]) if g[3] else {}}
+             for g in conn.execute("SELECT id, status, kind, spec_json FROM gates WHERE run_id = ?", [run_id]).fetchall()}
+    verdict_data = conn.execute("SELECT verdict, reason_json FROM verdicts WHERE run_id = ? ORDER BY id DESC LIMIT 1", [run_id]).fetchone()
+    verdict = verdict_data[0] if verdict_data else None
+
+    # 1. Verdict contradiction: done but gates still pending
+    if verdict in ("demo_done",):
+        critical_pending = sum(1 for g, info in gates.items() if info["status"] in ("pending", "blocked") and "critical" in str(info.get("spec", {})))
+        if critical_pending > 0:
+            issues.append({"type": "verdict_contradiction", "detail": f"verdict={verdict} but {critical_pending} critical gate(s) pending", "severity": "critical"})
+
+    # 2. Verdict done but total=0
+    if verdict_data and not gates:
+        issues.append({"type": "empty_run", "detail": "verdict exists but 0 gates", "severity": "critical"})
+
+    # 3. Build gate pending/failed but summary claims build passed
+    build_gate = gates.get("gate.build.production", {})
+    if build_gate:
+        if build_gate.get("status") in ("pending", "failed"):
+            details.append({"type": "build_not_passed", "detail": f"build gate is {build_gate.get('status')}", "severity": "major"})
+
+    # 4. Typecheck pending
+    type_gate = gates.get("gate.typecheck", {})
+    if type_gate and type_gate.get("status") in ("pending",):
+        details.append({"type": "typecheck_pending", "detail": "typecheck gate not passed", "severity": "major"})
+
+    # 5. Evidence: file_exists gates with missing files
+    for gid, info in gates.items():
+        spec = info.get("spec", {})
+        if info["status"] == "passed" and info["kind"] in ("file_exists", "file_exists_or_note"):
+            for p in spec.get("paths", []):
+                # Resolve <run-id>
+                p_resolved = p.replace("<run-id>", run_id) if "<run-id>" in p else p
+                if not os.path.exists(p_resolved):
+                    issues.append({"type": "evidence_file_missing", "detail": f"gate {gid}: required file {p_resolved} not found", "severity": "critical", "gate": gid})
+
+    # 6. Evidence refs: attached files that don't exist
+    ev_files = conn.execute("SELECT gate_id, path FROM evidence_refs WHERE run_id = ? AND evidence_type = 'file' AND path IS NOT NULL", [run_id]).fetchall()
+    for gate_id, path in ev_files:
+        if path and not os.path.exists(path) and path != "/dev/null":
+            issues.append({"type": "evidence_file_missing", "detail": f"gate {gate_id}: evidence file {path} not found", "severity": "critical", "gate": gate_id})
+
+    # 7. Smoke/E2E report exists but gate pending
+    smoke_gate = gates.get("gate.tests.smoke", {})
+    if smoke_gate and smoke_gate.get("status") == "passed":
+        report_files = conn.execute("SELECT path FROM evidence_refs WHERE run_id = ? AND gate_id = 'gate.evidence.report' AND evidence_type = 'file'", [run_id]).fetchall()
+        if not report_files:
+            details.append({"type": "smoke_report_missing", "detail": "smoke passed but no evidence report attached", "severity": "major"})
+
+    # 8. Evidence files from previous export
+    ev_path = os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence", "atm-export.json")
+    if os.path.exists(ev_path):
+        details.append({"type": "export_exists", "detail": f"atm-export.json at {ev_path}", "severity": "info"})
+    elif os.path.exists(os.path.join(os.path.dirname(DB_DIR), "evidence", run_id, "atm-export")):
+        details.append({"type": "export_exists", "detail": "atm-export in puff evidence dir", "severity": "info"})
+
+    # 9. Summary file exists
+    if summary_path and not os.path.exists(summary_path):
+        issues.append({"type": "summary_missing", "detail": f"summary.md not found at {summary_path}", "severity": "critical"})
+
+    # 10. Service/route files
+    service_files = ["product/apps/api/src/services/reconciliation.ts", "product/apps/api/src/routes/reconciliation-routes.ts"]
+    for sf in service_files:
+        p = os.path.join(PROJECT_ROOT if "PROJECT_ROOT" in dir() else os.path.dirname(DB_DIR), sf)
+        if os.path.exists(p):
+            details.append({"type": "service_file_exists", "detail": f"{sf} exists", "severity": "info"})
+
+    # Collect status
+    critical_issues = [i for i in issues if i.get("severity") == "critical"]
+    major_issues = [i for i in issues if i.get("severity") == "major"] + [i for i in details if i.get("severity") == "major"]
+
+    return {
+        "run_id": run_id,
+        "verdict": verdict,
+        "gate_count": len(gates),
+        "passed_gates": sum(1 for g in gates.values() if g["status"] == "passed"),
+        "critical_issues": len(critical_issues),
+        "major_issues": len(major_issues),
+        "pass": len(critical_issues) == 0 and len(major_issues) == 0,
+        "issues": issues + [d for d in details if d.get("severity") in ("critical", "major")],
+        "warnings": [d for d in details if d.get("severity") in ("minor", "info")],
+    }
+
+
 def cmd_export(run_id, output_dir):
     conn = _ensure_db()
     os.makedirs(output_dir, exist_ok=True)
