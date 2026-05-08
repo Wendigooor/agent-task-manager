@@ -15,67 +15,63 @@ def _run_id(args):
 def _add_json(p):
     p.add_argument("--json", action="store_true", help="JSON output")
 
+def _add_id(p):
+    p.add_argument("--id", help="Run ID (default: latest active)")
+
 def main():
     p = argparse.ArgumentParser(prog="atm", description="Agent Task Manager — Gate Runner",
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--id", metavar="RUN_ID", help="Run ID (default: latest active)")
+    p.add_argument("--id", metavar="RUN_ID", help="Run ID (global, put before command)")
     sub = p.add_subparsers(dest="command", required=True)
 
-    # init-run
-    sp = sub.add_parser("init-run", help="Create new run"); _add_json(sp)
-    sp.add_argument("--id", required=True); sp.add_argument("--profile", default="demo")
-    sp.add_argument("--contract")
+    def _sp(name, help_text):
+        sp = sub.add_parser(name, help=help_text)
+        _add_json(sp)
+        _add_id(sp)
+        return sp
+
+    # init-run (no --id from _sp, uses its own required --id)
+    sp = sub.add_parser("init-run", help="Create new run")
+    _add_json(sp); sp.add_argument("--id", required=True)
+    sp.add_argument("--profile", default="demo"); sp.add_argument("--contract")
 
     # import-gates
-    sp = sub.add_parser("import-gates", help="Import gates from profile"); _add_json(sp)
-    sp.add_argument("--profile", default="demo"); sp.add_argument("--file")
+    sp = _sp("import-gates", "Import gates"); sp.add_argument("--profile", default="demo"); sp.add_argument("--file")
 
-    # next
-    sp = sub.add_parser("next", help="Show next unblocked gate"); _add_json(sp)
-
-    # start
-    sp = sub.add_parser("start", help="Start a gate"); _add_json(sp)
-    sp.add_argument("--gate", required=True)
-
-    # pass
-    sp = sub.add_parser("pass", help="Pass a manual gate"); _add_json(sp)
-    sp.add_argument("--gate", required=True); sp.add_argument("--file"); sp.add_argument("--note")
-
-    # fail
-    sp = sub.add_parser("fail", help="Fail a gate"); _add_json(sp)
-    sp.add_argument("--gate", required=True); sp.add_argument("--reason", required=True)
-
-    # block
-    sp = sub.add_parser("block", help="Block a gate"); _add_json(sp)
-    sp.add_argument("--gate", required=True); sp.add_argument("--reason", required=True)
+    # next / start / pass / fail / block
+    for cmd in ("next",):
+        _sp(cmd, f"Show next unblocked gate")
+    for cmd in ("start", "pass", "fail", "block"):
+        sp = _sp(cmd, None)
+        sp.add_argument("--gate", required=True)
+        if cmd in ("fail", "block"):
+            sp.add_argument("--reason", required=True)
+        if cmd == "pass":
+            sp.add_argument("--file"); sp.add_argument("--note")
 
     # run
-    sp = sub.add_parser("run", help="Run a command gate"); _add_json(sp)
+    sp = _sp("run", "Run a command gate")
     sp.add_argument("--gate", required=True); sp.add_argument("--timeout", type=int, default=300)
     sp.add_argument("cmd", nargs=argparse.REMAINDER, help="Command (use -- before)")
 
     # evidence
-    sp = sub.add_parser("evidence", help="Attach evidence"); _add_json(sp)
-    sp.add_argument("--gate", required=True); sp.add_argument("--file"); sp.add_argument("--note")
+    sp = _sp("evidence", "Attach evidence"); sp.add_argument("--gate", required=True)
+    sp.add_argument("--file"); sp.add_argument("--note")
 
-    # status
-    sp = sub.add_parser("status", help="Run overview"); _add_json(sp)
-
-    # verify
-    sp = sub.add_parser("verify", help="Check for contradictions"); _add_json(sp)
-
-    # verify-integrity
-    sp = sub.add_parser("verify-integrity", help="Check integrity (alias)"); _add_json(sp)
-
-    # verdict
-    sp = sub.add_parser("verdict", help="Compute final status"); _add_json(sp)
+    # status / verify / verify-integrity / verdict / doctor
+    for cmd in ("status", "verify", "verify-integrity", "verdict"):
+        _sp(cmd, None)
 
     # export
-    sp = sub.add_parser("export", help="Export run as JSON"); _add_json(sp)
-    sp.add_argument("--out", required=True)
+    sp = _sp("export", "Export run as JSON"); sp.add_argument("--out", required=True)
 
-    # doctor
-    sp = sub.add_parser("doctor", help="Check ATM environment"); _add_json(sp)
+    # doctor (no --id needed)
+    sp = sub.add_parser("doctor", help="Check ATM environment")
+    _add_json(sp)
+
+    # smoke
+    sp = sub.add_parser("smoke", help="Quick smoke test: init → import → run → verdict")
+    _add_json(sp)
 
     args = p.parse_args()
     rid = _run_id(args)
@@ -84,7 +80,7 @@ def main():
         if args.command == "init-run":
             result = cmd_init_run(args.id, args.profile, args.contract)
         elif args.command == "import-gates":
-            result = cmd_import_gates(args.profile, args.file)
+            result = cmd_import_gates(args.profile, args.file, rid)
         elif args.command == "next":
             result = cmd_next(rid)
         elif args.command == "start":
@@ -113,6 +109,8 @@ def main():
             result = cmd_export(rid, args.out)
         elif args.command == "doctor":
             result = cmd_doctor()
+        elif args.command == "smoke":
+            result = _cmd_smoke(rid, args)
         else:
             result = {"error": f"Unknown: {args.command}"}
     except Exception as e:
@@ -128,7 +126,14 @@ def main():
         _human(args.command, result)
 
 def _human(cmd, r):
-    if cmd == "verdict":
+    if cmd == "smoke":
+        print("SMOKE TEST")
+        for step in r.get("steps", []):
+            status = "✅" if step[0] else "❌"
+            print(f"  {status} {step[1]}: {step[2]}")
+        print(f"\nOverall: {'PASS' if r.get('pass') else 'FAIL'}")
+
+    elif cmd == "verdict":
         print(f"Verdict: {r.get('verdict')} — {r.get('reason')}")
         s = r.get("summary", {})
         print(f"  Passed: {s.get('passed', 0)}/{s.get('total', 0)} | Critical: {s.get('critical_failed', 0)} failed, {s.get('critical_pending', 0)} pending")

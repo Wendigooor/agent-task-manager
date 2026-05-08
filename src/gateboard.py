@@ -5,7 +5,10 @@ from datetime import datetime
 
 DB_DIR = os.environ.get("ATM_DB_DIR", os.path.join(os.path.dirname(__file__), "..", ".atm"))
 DB_PATH = os.environ.get("ATM_DB_PATH", os.path.join(DB_DIR, "state.db"))
-PROJECT_ROOT = os.environ.get("ATM_PROJECT_ROOT", os.path.dirname(os.path.dirname(__file__)))
+PROJECT_ROOT = os.environ.get("ATM_PROJECT_ROOT") or os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_DB_DIR = os.environ.get("ATM_DB_DIR", os.path.join(PROJECT_ROOT, ".atm"))
+DB_PATH = os.environ.get("ATM_DB_PATH", os.path.join(_DB_DIR, "state.db"))
+DB_DIR = _DB_DIR
 
 def _ensure_db():
     os.makedirs(DB_DIR, exist_ok=True)
@@ -130,12 +133,13 @@ def cmd_init_run(run_id, profile, contract_path=None):
     conn.commit()
     return {"status": "created", "run_id": run_id, "profile": profile}
 
-def cmd_import_gates(profile=None, file_path=None):
+def cmd_import_gates(profile=None, file_path=None, run_id=None):
     conn = _ensure_db()
-    runs = conn.execute("SELECT id FROM runs WHERE status = 'active' ORDER BY created_at DESC LIMIT 1").fetchall()
-    if not runs:
-        return {"error": "No active run. Run init-run first."}
-    run_id = runs[0][0]
+    if not run_id:
+        runs = conn.execute("SELECT id FROM runs WHERE status = 'active' ORDER BY created_at DESC LIMIT 1").fetchall()
+        if not runs:
+            return {"error": "No active run. Run init-run first."}
+        run_id = runs[0][0]
 
     default_demo = {
         "gates": [
@@ -434,17 +438,12 @@ def cmd_doctor():
     """Check ATM environment health."""
     issues = []
     # Check bin/atm relative to project root
-    bin_atm_path = os.path.join(PROJECT_ROOT, "bin", "atm") if "PROJECT_ROOT" in dir() else None
-    if bin_atm_path and os.path.exists(bin_atm_path):
+    bin_path = os.path.join(PROJECT_ROOT, "bin", "atm")
+    if os.path.exists(bin_path):
         bin_status = "exists"
     else:
-        # Try relative to db dir
-        alt = os.path.join(os.path.dirname(DB_DIR), "bin", "atm")
-        if os.path.exists(alt):
-            bin_status = "exists"
-        else:
-            bin_status = "missing"
-            issues.append("bin/atm not found")
+        bin_status = "missing"
+        issues.append(f"bin/atm not found at {bin_path}")
     
     # Check DB writable
     try:
@@ -469,6 +468,87 @@ def cmd_doctor():
         "profiles": profiles,
         "issues": issues
     }
+
+
+def _cmd_smoke(run_id, args=None):
+    """Quick smoke test: doctor → init → import → run → verify → verdict."""
+    import tempfile, os, json
+    results = []
+
+    # Use temp DB
+    tmpdir = tempfile.mkdtemp(prefix="atm-smoke-")
+    old_db = os.environ.get("ATM_DB_PATH")
+    old_dir = os.environ.get("ATM_DB_DIR")
+    os.environ["ATM_DB_PATH"] = os.path.join(tmpdir, "state.db")
+    os.environ["ATM_DB_DIR"] = tmpdir
+
+    try:
+        # Redo imports with new env
+        import importlib
+        import gateboard
+        importlib.reload(gateboard)
+        from gateboard import cmd_init_run, cmd_import_gates, cmd_run, cmd_verify_integrity, cmd_verdict, cmd_doctor, cmd_export
+
+        # Step 1: doctor
+        try:
+            dr = cmd_doctor()
+            results.append((dr.get("status") == "healthy", "doctor", dr.get("status", "?")))
+        except Exception as e:
+            results.append((False, "doctor", str(e)))
+
+        # Step 2: init-run
+        rid = run_id or "smoke-test"
+        try:
+            ir = cmd_init_run(rid, "demo", None)
+            results.append((ir.get("status") == "created", "init-run", ir.get("status", "?")))
+        except Exception as e:
+            results.append((False, "init-run", str(e)))
+
+        # Step 3: import-gates
+        try:
+            ig = cmd_import_gates("demo", None)
+            results.append((ig.get("count", 0) > 0, "import-gates", f"{ig.get('count', 0)} gates"))
+        except Exception as e:
+            results.append((False, "import-gates", str(e)))
+
+        # Step 4: run build
+        try:
+            ru = cmd_run(rid, "gate.build.production", "echo build ok", 30)
+            results.append((ru.get("exit_code") == 0, "run build", f"exit {ru.get('exit_code')}"))
+        except Exception as e:
+            results.append((False, "run build", str(e)))
+
+        # Step 5: verify
+        try:
+            ve = cmd_verify_integrity(rid)
+            results.append((ve.get("pass", False), "verify", "no contradictions" if ve.get("pass") else f"{len(ve.get('issues', []))} issues"))
+        except Exception as e:
+            results.append((False, "verify", str(e)))
+
+        # Step 6: verdict
+        try:
+            vd = cmd_verdict(rid)
+            results.append((vd.get("verdict") == "technical_partial", "verdict", vd.get("verdict", "?")))
+        except Exception as e:
+            results.append((False, "verdict", str(e)))
+
+        # Step 7: export
+        try:
+            ex = cmd_export(rid, tmpdir)
+            results.append((ex.get("exported"), "export", ex.get("path", "?")))
+        except Exception as e:
+            results.append((False, "export", str(e)))
+
+        all_pass = all(r[0] for r in results)
+        return {"pass": all_pass, "steps": results, "tmpdir": tmpdir, "run_id": rid}
+
+    finally:
+        # Restore env
+        if old_db: os.environ["ATM_DB_PATH"] = old_db
+        else: os.environ.pop("ATM_DB_PATH", None)
+        if old_dir: os.environ["ATM_DB_DIR"] = old_dir
+        else: os.environ.pop("ATM_DB_DIR", None)
+
 
 def cmd_export(run_id, output_dir):
     conn = _ensure_db()
