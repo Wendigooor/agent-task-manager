@@ -1,117 +1,68 @@
-# Agent Task Manager
+# Agent Task Manager — Gate Runner
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 [![SQLite](https://img.shields.io/badge/db-sqlite-003b57)]()
-[![Lines](https://img.shields.io/badge/total-730%20lines-lightgrey)]()
 
-A SQLite-backed task management framework for AI agents.
+A SQLite-backed gate runner for AI agents. Prevents fake `done` by enforcing gates, evidence, and verdicts through deterministic Python, not agent prose.
 
-**No markdown plans. No raw SQL. No hallucinated states.**
-Agents call typed CLI scripts. Python enforces the rules.
+## What's New: Gate Runner (v0.1)
 
----
+The `gate_agent.py` adds a gate state machine on top of the existing task system:
 
-## Why?
-
-AI agents cannot reliably manage their own state. They forget, hallucinate
-statuses, and produce inconsistent outputs. Text files (PLAN.md with checkboxes)
-are not state management — they're chaos.
-
-The solution: a **deterministic shell** around the probabilistic LLM. The agent
-becomes a "brain" that invokes CLI commands. The Python framework enforces
-valid transitions, prevents data corruption, and keeps the context window clean.
-
----
-
-## How It Works
+### CLI Commands
 
 ```
-                  README.md (constitution)
-                       │
-                  AI Agent (LLM)
-                       │
-      ┌────────────────┼────────────────┐
-      ▼                ▼                ▼
-  read_agent     workitem_agent    status_agent
-  (read-only)     (task CRUD)      (state machine)
-      │                │                │
-      └────────────────┼────────────────┘
-                       ▼
-                  taskboard.py  (ORM)
-                       │
-                  plans.db  (SQLite)
+atm init-run --id <run> --profile demo       # Create a new run
+atm import-gates --profile demo               # Import gate profile
+atm next                                      # Next unblocked gate
+atm start --gate <id>                         # Start working on a gate
+atm run --gate <id> --command '<cmd>'          # Run command gate (exit-code based)
+atm pass --gate <id> --note '...'             # Pass manual gate
+atm fail --gate <id> --reason '...'           # Fail a gate
+atm evidence --gate <id> --file <path>         # Attach evidence
+atm status                                     # Run overview
+atm verify                                     # Check for contradictions
+atm verdict                                    # Computed final status
+atm export --out <dir>                         # Export run evidence
 ```
 
-The agent receives one instruction: *"Read README.md. Tell me the project status
-and what to do next."* It calls CLI scripts to query the database, claim tasks,
-update statuses. The state machine prevents invalid transitions. The ORM hides
-raw SQL. One task at a time — no context bloat.
+### Gate Types
 
----
+| Type | Description | Pass condition |
+|------|-------------|---------------|
+| `command` | Runs shell command | Exit code 0 only |
+| `manual` | Agent judgment | Requires evidence or note |
+| `file_exists` | Required files | Files must exist on disk |
+| `screenshot_set` | Screenshot quality | Min count + min size |
+| `composite` | Computed verdict | ATM logic |
 
-## Quick Start
+### Demo
 
 ```bash
-python3 src/taskboard.py           # Initialize database
-python3 src/db_log.py              # View everything in the DB
-python3 src/read_agent.py phases   # Project status
-python3 src/read_agent.py next     # Next task to work on
+python3 src/demo_flow.py
 ```
 
-Full workflow:
+Shows: init → import gates → run build → pass discovery → run E2E → evidence → verify → verdict → export.
 
-```bash
-python3 src/read_agent.py next                    # 1. Find task
-python3 src/read_agent.py context <id>            # 2. Load details
-python3 src/workitem_agent.py claim <id>          # 3. Claim it
-# ... write code ...
-python3 src/workitem_agent.py update-status <id> --status done  # 4. Complete
-```
-
----
-
-## State Machine
+### Architecture
 
 ```
-todo ──→ in_progress ──→ needs_review ──→ done
-  │          │                │
-  └──→ blocked ←──┘            │
-                               │
-                        failed ←┘
+src/
+├── gateboard.py       # Gate ORM, CLI logic, SQLite schema
+├── gate_agent.py     # CLI entry point
+├── demo_flow.py      # End-to-end demo
+├── taskboard.py      # (existing) Task state machine
+├── read_agent.py     # (existing)
+├── workitem_agent.py # (existing)
+└── status_agent.py   # (existing)
+.atm/state.db         # SQLite database (auto-created)
 ```
 
-If the agent tries `todo → done` directly, `status_agent.py` returns an error.
-Python enforces the rules. Prompts don't.
+### SQLite Tables
 
----
-
-## Files
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `src/memory.py` | 13 | DB connection |
-| `src/taskboard.py` | 292 | ORM: tables, transitions, seed data |
-| `src/read_agent.py` | 82 | Read-only queries |
-| `src/workitem_agent.py` | 78 | Task CRUD |
-| `src/status_agent.py` | 82 | State machine validation |
-| `src/milestone_agent.py` | 62 | Milestone lifecycle |
-| `src/db_log.py` | 59 | Human-readable DB dump |
-| `README.md` | — | Constitution + CLI reference |
-| `HOW_IT_WORKS.md` | — | Architecture schematic |
-| `SCALING_UP.md` | — | Multi-service, MCP, inbox v2 design |
-
-Total: ~730 lines of Python.
-
----
-
-## Real Example: Twitter Digest Project
-
-`test-run/PLAN.md` and `test-run/DB_LOG.txt` show the framework managing a
-real project plan: 3 milestones (Core Engine, Delivery, Output), 6 tasks
-(TW-001 through TW-006), with progress logs and status transitions.
-
----
-
-## License
-
-MIT
+- `runs` — run metadata and verdict
+- `gates` — gates with kind, severity, status, spec
+- `gate_events` — append-only event log
+- `evidence_refs` — evidence files and notes
+- `command_runs` — command execution logs
+- `verdicts` — computed verdict history
