@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 tmpdir = tempfile.mkdtemp(prefix="atm-audit-test-")
 os.environ["ATM_DB_DIR"] = tmpdir
 os.environ["ATM_DB_PATH"] = os.path.join(tmpdir, "state.db")
+os.environ["ATM_PROJECT_ROOT"] = tmpdir
 
 from gateboard import *
 from datetime import datetime
