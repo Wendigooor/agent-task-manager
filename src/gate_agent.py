@@ -7,7 +7,7 @@ from gateboard import *
 
 def main():
     parser = argparse.ArgumentParser(description="ATM Gate Agent — Lightweight Gate Runner")
-    parser.add_argument("command", choices=["init-run", "import-gates", "next", "start", "pass", "fail", "block", "run", "evidence", "status", "verify", "verify-integrity", "verdict", "export"])
+    parser.add_argument("command", choices=["init-run", "import-gates", "next", "start", "pass", "fail", "block", "run", "evidence", "status", "verify", "verify-integrity", "verdict", "export", "doctor"])
     parser.add_argument("--id", help="Run ID")
     parser.add_argument("--profile", default="demo", help="Gate profile (demo, feature, patch, benchmark)")
     parser.add_argument("--contract", help="Path to contract file")
@@ -66,10 +66,17 @@ def main():
         if not args.gate:
             result = {"error": "--gate is required"}
         elif not args.command and not args.remainder:
-            result = {"error": "command is required (use --command or --)"}
+            result = {"error": "command is required (use --command or -- separator)"}
         else:
-            cmd = args.command or " ".join(args.remainder) if hasattr(args, 'remainder') and args.remainder else args.command
-            result = cmd_run(args.id or _latest_run(), args.gate, cmd, args.timeout)
+            cmd = args.command
+            if not cmd and args.remainder:
+                cmd = " ".join(args.remainder).lstrip("-- ")
+            elif not cmd:
+                cmd = args.remainder[0] if args.remainder else None
+            if not cmd:
+                result = {"error": "No command provided"}
+            else:
+                result = cmd_run(args.id or _latest_run(), args.gate, cmd, args.timeout)
 
     elif args.command == "evidence":
         if not args.gate:

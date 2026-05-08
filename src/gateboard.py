@@ -3,8 +3,9 @@
 import sqlite3, json, os, hashlib, time, subprocess
 from datetime import datetime
 
-DB_DIR = os.path.join(os.path.dirname(__file__), "..", ".atm")
-DB_PATH = os.path.join(DB_DIR, "state.db")
+DB_DIR = os.environ.get("ATM_DB_DIR", os.path.join(os.path.dirname(__file__), "..", ".atm"))
+DB_PATH = os.environ.get("ATM_DB_PATH", os.path.join(DB_DIR, "state.db"))
+PROJECT_ROOT = os.environ.get("ATM_PROJECT_ROOT", os.path.dirname(os.path.dirname(__file__)))
 
 def _ensure_db():
     os.makedirs(DB_DIR, exist_ok=True)
@@ -84,6 +85,28 @@ def _event(conn, run_id, gate_id, event_type, payload=None):
         [run_id, gate_id, event_type, json.dumps(payload) if payload else None, now()]
     )
     conn.commit()
+
+
+def _subst(s, run_id):
+    """Replace <run-id> with actual run_id in paths."""
+    if not s or "<run-id>" not in str(s):
+        return s
+    if isinstance(s, str):
+        return s.replace("<run-id>", run_id)
+    if isinstance(s, list):
+        return [item.replace("<run-id>", run_id) for item in s]
+    return s
+
+def _subst_spec(spec, run_id):
+    """Apply template substitution to spec fields."""
+    if not spec:
+        return spec
+    for key in ("paths", "command"):
+        if key in spec and isinstance(spec[key], str) and "<run-id>" in spec[key]:
+            spec[key] = spec[key].replace("<run-id>", run_id)
+        if key in spec and isinstance(spec[key], list):
+            spec[key] = [item.replace("<run-id>", run_id) for item in spec[key]]
+    return spec
 
 def _sha256(path):
     try:
@@ -328,7 +351,7 @@ def cmd_verify_integrity(run_id=None):
     export_path = os.path.join(DB_DIR, "..", "evidence", run_id, "atm-export.json")
 
     for gid, status, kind, spec_json in gates:
-        spec = json.loads(spec_json) if spec_json else {}
+        spec = _subst_spec(json.loads(spec_json) if spec_json else {}, run_id)
         ev = conn.execute("SELECT COUNT(*) FROM evidence_refs WHERE run_id = ? AND gate_id = ?", [run_id, gid]).fetchone()[0]
 
         if status == "passed" and ev == 0 and kind not in ("command", "composite"):
@@ -452,10 +475,10 @@ def cmd_export(run_id, output_dir):
 
     export = {
         "run": {"id": run[0], "profile": run[1], "contract": run[2], "status": run[3], "verdict": run[6] if len(run) > 6 else None},
-        "gates": [{"id": g[1], "title": g[2], "severity": g[3], "kind": g[4], "status": g[5]} for g in gates],
+        "gates": [{"id": g[0], "title": g[2], "severity": g[3], "kind": g[4], "status": g[5]} for g in gates],
         "events": [{"id": e[0], "gate_id": e[2], "type": e[3], "payload": json.loads(e[4]) if e[4] else None, "at": e[5]} for e in events],
-        "evidence": [{"gate_id": e[2], "type": e[3], "path": e[4], "sha256": e[6]} for e in evidence if e[2]],
-        "commands": [{"gate_id": c[2], "command": c[3], "exit_code": c[4], "duration_ms": c[6]} for c in commands],
+        "evidence": [{"gate_id": e[2], "type": e[3], "path": e[4], "sha256": e[5]} for e in evidence if e[2]],
+        "commands": [{"gate_id": c[2], "command": c[3], "exit_code": c[4], "duration_ms": c[7]} for c in commands],
         "verdict": {"verdict": verdicts[0][2], "reason": json.loads(verdicts[0][3]) if verdicts else None} if verdicts else None,
     }
 
