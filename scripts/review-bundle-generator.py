@@ -118,7 +118,8 @@ def build_bundle(run_id: str, project_root: str, atm_bin: str):
         name = os.path.basename(cf)
         dst = os.path.join(src_dir, name)
         if os.path.exists(dst):
-            continue  # already copied
+            manifest[f"source/{name}"] = "✅ (already present)"
+            continue
         # Try direct path first
         cf_src = os.path.join(project_root, cf)
         if os.path.exists(cf_src):
@@ -153,6 +154,7 @@ def build_bundle(run_id: str, project_root: str, atm_bin: str):
                     name = os.path.basename(gf)
                     dst = os.path.join(src_dir, name)
                     if os.path.exists(dst):
+                        manifest[f"source/{name}"] = "✅ (already present)"
                         continue
                     if os.path.exists(os.path.join(project_root, gf)):
                         shutil.copy2(os.path.join(project_root, gf), dst)
@@ -236,7 +238,20 @@ if __name__ == "__main__":
     ap.add_argument("--id", required=True, help="Run ID")
     ap.add_argument("--project-root", default=os.getcwd(), help="Project root (default: cwd)")
     ap.add_argument("--atm-bin", default=None, help="Path to project's scripts/atm (default: <project-root>/scripts/atm)")
+    ap.add_argument("--clean", action="store_true", help="Clean review-bundle dir before generation (remove stale files)")
     args = ap.parse_args()
+
+    # Clean mode
+    if args.clean:
+        bundle_dir = os.path.join(args.project_root, "agent", "atm", "runs", args.id, "review-bundle")
+        for sub in ["source", "reports"]:
+            p = os.path.join(bundle_dir, sub)
+            if os.path.exists(p):
+                for f in glob.glob(os.path.join(p, "*")):
+                    os.remove(f)
+        for f in glob.glob(os.path.join(bundle_dir, "*")):
+            if os.path.isfile(f) and not f.endswith("REVIEW_BUNDLE_MANIFEST.md"):
+                os.remove(f)
 
     # Resolve atm-bin
     if args.atm_bin:
