@@ -1,147 +1,168 @@
 #!/usr/bin/env python3
-"""ATM Gate Agent CLI — init-run, import-gates, next, start, run, pass, fail, evidence, status, verify, verdict, export."""
+"""ATM Gate Agent CLI — subparsers, documented, stable."""
 
-import sys, json, os, argparse
+import sys, os, json, argparse
+
 sys.path.insert(0, os.path.dirname(__file__))
 from gateboard import *
 
+def _run_id(args):
+    if args.id:
+        return args.id
+    r = cmd_status()
+    return r.get("run_id") if isinstance(r, dict) else None
+
+def _add_json(p):
+    p.add_argument("--json", action="store_true", help="JSON output")
+
 def main():
-    parser = argparse.ArgumentParser(description="ATM Gate Agent — Lightweight Gate Runner")
-    parser.add_argument("command", choices=["init-run", "import-gates", "next", "start", "pass", "fail", "block", "run", "evidence", "status", "verify", "verify-integrity", "verdict", "export", "doctor"])
-    parser.add_argument("--id", help="Run ID")
-    parser.add_argument("--profile", default="demo", help="Gate profile (demo, feature, patch, benchmark)")
-    parser.add_argument("--contract", help="Path to contract file")
-    parser.add_argument("--file", help="Path to gates YAML")
-    parser.add_argument("--gate", help="Gate ID")
-    parser.add_argument("--reason", help="Reason for fail/block")
-    parser.add_argument("--evidence", help="Evidence file path")
-    parser.add_argument("--note", help="Evidence note")
-    parser.add_argument("--command", help="Command to run (for `run` subcommand)")
-    parser.add_argument("--timeout", type=int, default=300, help="Command timeout in seconds")
-    parser.add_argument("--out", default=None, help="Output directory for export")
-    parser.add_argument("--json", action="store_true", help="JSON output")
-    parser.add_argument("remainder", nargs=argparse.REMAINDER, help="Remaining arguments (for `run` subcommand command)")
+    p = argparse.ArgumentParser(prog="atm", description="Agent Task Manager — Gate Runner",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--id", metavar="RUN_ID", help="Run ID (default: latest active)")
+    sub = p.add_subparsers(dest="command", required=True)
 
-    args = parser.parse_args()
+    # init-run
+    sp = sub.add_parser("init-run", help="Create new run"); _add_json(sp)
+    sp.add_argument("--id", required=True); sp.add_argument("--profile", default="demo")
+    sp.add_argument("--contract")
 
-    result = {}
+    # import-gates
+    sp = sub.add_parser("import-gates", help="Import gates from profile"); _add_json(sp)
+    sp.add_argument("--profile", default="demo"); sp.add_argument("--file")
 
-    if args.command == "init-run":
-        if not args.id:
-            result = {"error": "--id is required"}
-        else:
+    # next
+    sp = sub.add_parser("next", help="Show next unblocked gate"); _add_json(sp)
+
+    # start
+    sp = sub.add_parser("start", help="Start a gate"); _add_json(sp)
+    sp.add_argument("--gate", required=True)
+
+    # pass
+    sp = sub.add_parser("pass", help="Pass a manual gate"); _add_json(sp)
+    sp.add_argument("--gate", required=True); sp.add_argument("--file"); sp.add_argument("--note")
+
+    # fail
+    sp = sub.add_parser("fail", help="Fail a gate"); _add_json(sp)
+    sp.add_argument("--gate", required=True); sp.add_argument("--reason", required=True)
+
+    # block
+    sp = sub.add_parser("block", help="Block a gate"); _add_json(sp)
+    sp.add_argument("--gate", required=True); sp.add_argument("--reason", required=True)
+
+    # run
+    sp = sub.add_parser("run", help="Run a command gate"); _add_json(sp)
+    sp.add_argument("--gate", required=True); sp.add_argument("--timeout", type=int, default=300)
+    sp.add_argument("cmd", nargs=argparse.REMAINDER, help="Command (use -- before)")
+
+    # evidence
+    sp = sub.add_parser("evidence", help="Attach evidence"); _add_json(sp)
+    sp.add_argument("--gate", required=True); sp.add_argument("--file"); sp.add_argument("--note")
+
+    # status
+    sp = sub.add_parser("status", help="Run overview"); _add_json(sp)
+
+    # verify
+    sp = sub.add_parser("verify", help="Check for contradictions"); _add_json(sp)
+
+    # verify-integrity
+    sp = sub.add_parser("verify-integrity", help="Check integrity (alias)"); _add_json(sp)
+
+    # verdict
+    sp = sub.add_parser("verdict", help="Compute final status"); _add_json(sp)
+
+    # export
+    sp = sub.add_parser("export", help="Export run as JSON"); _add_json(sp)
+    sp.add_argument("--out", required=True)
+
+    # doctor
+    sp = sub.add_parser("doctor", help="Check ATM environment"); _add_json(sp)
+
+    args = p.parse_args()
+    rid = _run_id(args)
+
+    try:
+        if args.command == "init-run":
             result = cmd_init_run(args.id, args.profile, args.contract)
-
-    elif args.command == "import-gates":
-        result = cmd_import_gates(args.profile, args.file)
-
-    elif args.command == "next":
-        result = cmd_next(args.id)
-
-    elif args.command == "start":
-        if not args.gate:
-            result = {"error": "--gate is required"}
-        else:
-            result = cmd_start(args.id or _latest_run(), args.gate)
-
-    elif args.command == "pass":
-        if not args.gate:
-            result = {"error": "--gate is required"}
-        else:
-            result = cmd_pass(args.id or _latest_run(), args.gate, args.evidence, args.note)
-
-    elif args.command == "fail":
-        if not args.gate:
-            result = {"error": "--gate is required"}
-        else:
-            result = cmd_fail(args.id or _latest_run(), args.gate, args.reason)
-
-    elif args.command == "block":
-        if not args.gate or not args.reason:
-            result = {"error": "--gate and --reason are required"}
-        else:
-            result = cmd_block(args.id or _latest_run(), args.gate, args.reason)
-
-    elif args.command == "run":
-        if not args.gate:
-            result = {"error": "--gate is required"}
-        elif not args.command and not args.remainder:
-            result = {"error": "command is required (use --command or -- separator)"}
-        else:
-            cmd = args.command
-            if not cmd and args.remainder:
-                cmd = " ".join(args.remainder).lstrip("-- ")
-            elif not cmd:
-                cmd = args.remainder[0] if args.remainder else None
+        elif args.command == "import-gates":
+            result = cmd_import_gates(args.profile, args.file)
+        elif args.command == "next":
+            result = cmd_next(rid)
+        elif args.command == "start":
+            result = cmd_start(rid, args.gate)
+        elif args.command == "pass":
+            result = cmd_pass(rid, args.gate, args.file, args.note)
+        elif args.command == "fail":
+            result = cmd_fail(rid, args.gate, args.reason)
+        elif args.command == "block":
+            result = cmd_block(rid, args.gate, args.reason)
+        elif args.command == "run":
+            cmd = " ".join(args.cmd).lstrip("-- ") if args.cmd else ""
             if not cmd:
-                result = {"error": "No command provided"}
+                result = {"error": "No command. Usage: atm run --gate <id> -- <shell cmd>"}
             else:
-                result = cmd_run(args.id or _latest_run(), args.gate, cmd, args.timeout)
-
-    elif args.command == "evidence":
-        if not args.gate:
-            result = {"error": "--gate is required"}
-        elif not args.file and not args.note:
-            result = {"error": "--file or --note is required"}
+                result = cmd_run(rid, args.gate, cmd, args.timeout)
+        elif args.command == "evidence":
+            result = cmd_evidence(rid, args.gate, args.file, args.note)
+        elif args.command == "status":
+            result = cmd_status(rid)
+        elif args.command in ("verify", "verify-integrity"):
+            result = cmd_verify_integrity(rid)
+        elif args.command == "verdict":
+            result = cmd_verdict(rid)
+        elif args.command == "export":
+            result = cmd_export(rid, args.out)
+        elif args.command == "doctor":
+            result = cmd_doctor()
         else:
-            result = cmd_evidence(args.id or _latest_run(), args.gate, args.file, args.note)
+            result = {"error": f"Unknown: {args.command}"}
+    except Exception as e:
+        result = {"error": str(e)}
 
-    elif args.command == "status":
-        result = cmd_status(args.id)
-
-    elif args.command == "verify":
-        result = cmd_verify(args.id)
-    elif args.command == "verify-integrity":
-        result = cmd_verify_integrity(args.id)
-
-    elif args.command == "verdict":
-        result = cmd_verdict(args.id)
-
-    elif args.command == "doctor":
-        result = cmd_doctor()
-    elif args.command == "export":
-        if not args.out:
-            result = {"error": "--out is required"}
-        else:
-            result = cmd_export(args.id or _latest_run(), args.out)
-
-    if args.json:
-        print(json.dumps(result, indent=2))
+    json_mode = getattr(args, "json", False) or "ATM_JSON" in os.environ
+    if json_mode:
+        print(json.dumps(result, indent=2, default=str))
     else:
         if "error" in result:
             print(f"ERROR: {result['error']}", file=sys.stderr)
             sys.exit(1)
-        if args.command == "verdict":
-            print(f"Verdict: {result.get('verdict', '?')}")
-            print(f"Reason: {result.get('reason', '?')}")
-        elif args.command == "verify":
-            if result.get("pass"):
-                print("Verify: PASSED")
-            else:
-                print(f"Verify: FAILED — {len(result.get('issues', []))} issue(s)")
-                for i in result.get("issues", []):
-                    print(f"  [{i.get('gate', '?')}] {i.get('issue', '?')}")
-        elif args.command == "next":
-            if "gate_id" in result:
-                print(f"Next: {result['gate_id']} ({result.get('severity', '?')})")
-                print(f"  Title: {result.get('title', '?')}")
-                print(f"  Pass: {result.get('pass_criteria', '?')}")
-            else:
-                print(json.dumps(result, indent=2))
-        elif args.command == "status":
-            print(f"Run: {result.get('run_id', '?')}")
-            print(f"Profile: {result.get('profile', '?')}")
-            print(f"Verdict: {result.get('verdict', '?')}")
-            bs = result.get("gates", {}).get("by_status", {})
-            print(f"Gates: {result.get('gates', {}).get('total', 0)} total")
-            for s, c in sorted(bs.items()):
-                print(f"  {s}: {c}")
-        else:
-            print(json.dumps(result, indent=2))
+        _human(args.command, result)
 
-def _latest_run():
-    r = cmd_status()
-    return r.get("run_id") if isinstance(r, dict) else None
+def _human(cmd, r):
+    if cmd == "verdict":
+        print(f"Verdict: {r.get('verdict')} — {r.get('reason')}")
+        s = r.get("summary", {})
+        print(f"  Passed: {s.get('passed', 0)}/{s.get('total', 0)} | Critical: {s.get('critical_failed', 0)} failed, {s.get('critical_pending', 0)} pending")
+    elif cmd in ("verify", "verify-integrity"):
+        if r.get("pass"):
+            print("Verify: PASSED")
+        else:
+            print(f"Verify: FAILED — {len(r.get('issues', []))} issue(s)")
+            for i in r.get("issues", []):
+                print(f"  [{i.get('gate')}] {i.get('issue')}")
+    elif cmd == "next":
+        if "gate_id" in r:
+            print(f"Next: {r['gate_id']} ({r.get('severity')})")
+            print(f"  Title: {r.get('title')}")
+            print(f"  Pass: {r.get('pass_criteria')}")
+        else:
+            print(json.dumps(r, indent=2))
+    elif cmd == "status":
+        print(f"Run: {r.get('run_id')} | {r.get('profile')} | Verdict: {r.get('verdict') or '—'}")
+        bs = r.get("gates", {}).get("by_status", {})
+        print(f"Gates: {r.get('gates', {}).get('total', 0)} total")
+        for s, c in sorted(bs.items()):
+            print(f"  {s}: {c}")
+    elif cmd == "doctor":
+        print(f"ATM: {r.get('status')}")
+        print(f"  DB: {r.get('db_path')}")
+        print(f"  bin/atm: {r.get('bin_atm')}")
+        if r.get("issues"):
+            for i in r["issues"]:
+                print(f"  Issue: {i}")
+    elif cmd == "export":
+        print(f"Exported: {r.get('path')}")
+    else:
+        print(json.dumps(r, indent=2))
 
 if __name__ == "__main__":
     main()

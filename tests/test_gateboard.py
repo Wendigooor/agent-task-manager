@@ -4,16 +4,15 @@
 import sys, os, json, tempfile, shutil, sqlite3
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-# Use temp DB for tests — set env BEFORE importing gateboard
-os.environ["ATM_DB_PATH"] = "/tmp/atm-test-state.db"
-os.environ["ATM_DB_DIR"] = "/tmp"
-# Clean any previous test data
-if os.path.exists("/tmp/atm-test-state.db"):
-    os.remove("/tmp/atm-test-state.db")
+# Use temp dir for tests — isolated from real DB and cwd
+_tmpdir = tempfile.mkdtemp(prefix="atm-test-")
+os.chdir(_tmpdir)
+os.environ["ATM_DB_DIR"] = _tmpdir
+os.environ["ATM_DB_PATH"] = os.path.join(_tmpdir, "state.db")
 
 # Clean DB before importing gateboard
 from gateboard import DB_PATH, _ensure_db
-assert "tmp" in DB_PATH, f"DB_PATH should be temp but got {DB_PATH}"
+assert _tmpdir in DB_PATH, f"DB_PATH should be in temp dir but got {DB_PATH}"
 
 # Now import everything
 from gateboard import *

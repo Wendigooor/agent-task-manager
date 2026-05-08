@@ -433,10 +433,18 @@ def cmd_verdict(run_id=None):
 def cmd_doctor():
     """Check ATM environment health."""
     issues = []
-    # Check bin/atm
-    bin_path = os.path.join(os.path.dirname(__file__) if "__file__" in dir() else ".", "..", "bin", "atm")
-    if not os.path.exists(bin_path):
-        issues.append("bin/atm not found")
+    # Check bin/atm relative to project root
+    bin_atm_path = os.path.join(PROJECT_ROOT, "bin", "atm") if "PROJECT_ROOT" in dir() else None
+    if bin_atm_path and os.path.exists(bin_atm_path):
+        bin_status = "exists"
+    else:
+        # Try relative to db dir
+        alt = os.path.join(os.path.dirname(DB_DIR), "bin", "atm")
+        if os.path.exists(alt):
+            bin_status = "exists"
+        else:
+            bin_status = "missing"
+            issues.append("bin/atm not found")
     
     # Check DB writable
     try:
@@ -455,7 +463,7 @@ def cmd_doctor():
     
     return {
         "status": "healthy" if not issues else "issues_found",
-        "bin_atm": "exists" if os.path.exists(bin_path) else "missing",
+        "bin_atm": bin_status,
         "db": "writable" if os.access(DB_DIR, os.W_OK) else "readonly",
         "db_path": DB_PATH,
         "profiles": profiles,
@@ -477,7 +485,7 @@ def cmd_export(run_id, output_dir):
         "run": {"id": run[0], "profile": run[1], "contract": run[2], "status": run[3], "verdict": run[6] if len(run) > 6 else None},
         "gates": [{"id": g[0], "title": g[2], "severity": g[3], "kind": g[4], "status": g[5]} for g in gates],
         "events": [{"id": e[0], "gate_id": e[2], "type": e[3], "payload": json.loads(e[4]) if e[4] else None, "at": e[5]} for e in events],
-        "evidence": [{"gate_id": e[2], "type": e[3], "path": e[4], "sha256": e[5]} for e in evidence if e[2]],
+        "evidence": [{"gate_id": e[2], "type": e[3], "path": e[4], "sha256": e[6]} for e in evidence if e[2]],
         "commands": [{"gate_id": c[2], "command": c[3], "exit_code": c[4], "duration_ms": c[7]} for c in commands],
         "verdict": {"verdict": verdicts[0][2], "reason": json.loads(verdicts[0][3]) if verdicts else None} if verdicts else None,
     }
