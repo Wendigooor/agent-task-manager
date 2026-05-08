@@ -566,17 +566,21 @@ def cmd_audit(run_id=None, summary_path=None):
     issues = []
     details = []
 
-    # Load gates
-    gates = {g[0]: {"status": g[1], "kind": g[2], "spec": json.loads(g[3]) if g[3] else {}}
-             for g in conn.execute("SELECT id, status, kind, spec_json FROM gates WHERE run_id = ?", [run_id]).fetchall()}
+    # Load gates with severity from column
+    gates = {g[0]: {"status": g[1], "kind": g[2], "severity": g[3], "spec": json.loads(g[4]) if g[4] else {}}
+             for g in conn.execute("SELECT id, status, kind, severity, spec_json FROM gates WHERE run_id = ?", [run_id]).fetchall()}
     verdict_data = conn.execute("SELECT verdict, reason_json FROM verdicts WHERE run_id = ? ORDER BY id DESC LIMIT 1", [run_id]).fetchone()
     verdict = verdict_data[0] if verdict_data else None
+    prev_verdict = verdict
 
     # 1. Verdict contradiction: done but gates still pending
+    # 1. Verdict contradiction: done but critical gates still pending
+    critical_pending = sum(1 for g, info in gates.items() if info["status"] in ("pending", "blocked") and info.get("severity") == "critical")
+    if critical_pending > 0:
+        issues.append({"type": "verdict_contradiction", "detail": f"{critical_pending} critical gate(s) pending/blocked", "severity": "critical"})
     if verdict in ("demo_done",):
-        critical_pending = sum(1 for g, info in gates.items() if info["status"] in ("pending", "blocked") and "critical" in str(info.get("spec", {})))
         if critical_pending > 0:
-            issues.append({"type": "verdict_contradiction", "detail": f"verdict={verdict} but {critical_pending} critical gate(s) pending", "severity": "critical"})
+            issues.append({"type": "verdict_demo_done_with_pending", "detail": f"verdict=demo_done but {critical_pending} critical gate(s) pending", "severity": "critical"})
 
     # 2. Verdict done but total=0
     if verdict_data and not gates:
@@ -609,21 +613,60 @@ def cmd_audit(run_id=None, summary_path=None):
         if path and not os.path.exists(path) and path != "/dev/null":
             issues.append({"type": "evidence_file_missing", "detail": f"gate {gate_id}: evidence file {path} not found", "severity": "critical", "gate": gate_id})
 
-    # 7. Smoke/E2E report exists but gate pending
+    # 7. Command-backed evidence: smoke passed but no command_run
     smoke_gate = gates.get("gate.tests.smoke", {})
     if smoke_gate and smoke_gate.get("status") == "passed":
+        cr = conn.execute("SELECT COUNT(*) FROM command_runs WHERE run_id = ? AND gate_id = 'gate.tests.smoke' AND exit_code = 0", [run_id]).fetchone()[0]
+        if cr == 0:
+            issues.append({"type": "smoke_not_run_through_atm", "detail": "smoke gate passed but no successful command_run recorded", "severity": "critical"})
         report_files = conn.execute("SELECT path FROM evidence_refs WHERE run_id = ? AND gate_id = 'gate.evidence.report' AND evidence_type = 'file'", [run_id]).fetchall()
         if not report_files:
             details.append({"type": "smoke_report_missing", "detail": "smoke passed but no evidence report attached", "severity": "major"})
 
-    # 8. Evidence files from previous export
-    ev_path = os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence", "atm-export.json")
-    if os.path.exists(ev_path):
-        details.append({"type": "export_exists", "detail": f"atm-export.json at {ev_path}", "severity": "info"})
-    elif os.path.exists(os.path.join(os.path.dirname(DB_DIR), "evidence", run_id, "atm-export")):
-        details.append({"type": "export_exists", "detail": "atm-export in puff evidence dir", "severity": "info"})
+    # 8. Compare live DB vs atm-export.json
+    for export_dir in [
+        os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence"),
+        os.path.join(os.path.dirname(DB_DIR), "evidence", run_id, "atm-export"),
+    ]:
+        export_path = os.path.join(export_dir, "atm-export.json")
+        if os.path.exists(export_path):
+            try:
+                with open(export_path) as f:
+                    export_data = json.load(f)
+                export_gates = export_data.get("gates", [])
+                if len(export_gates) != len(gates):
+                    details.append({"type": "export_mismatch", "detail": f"export has {len(export_gates)} gates, live DB has {len(gates)}", "severity": "major"})
+                else:
+                    for eg in export_gates:
+                        lg = gates.get(eg.get("id", ""), {})
+                        if lg and lg.get("status") != eg.get("status"):
+                            details.append({"type": "export_status_mismatch", "detail": f"gate {eg.get('id')}: export={eg.get('status')}, live={lg.get('status')}", "severity": "major"})
+                # Check verdict
+                export_v = export_data.get("verdict", {}).get("verdict") if isinstance(export_data.get("verdict"), dict) else None
+                if export_v and export_v != (verdict or prev_verdict):
+                    details.append({"type": "export_verdict_mismatch", "detail": f"export says {export_v}, live says {verdict or 'none'}", "severity": "major"})
+            except Exception as e:
+                details.append({"type": "export_parse_error", "detail": str(e)[:100], "severity": "minor"})
+            break
 
-    # 9. Summary file exists
+    # 9. Check report semantics if report exists
+    report_path = None
+    for p in [os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence", "reconciliation-report.json"),
+              os.path.join(os.path.dirname(DB_DIR), "evidence", "wallet-ledger-reconciliation", "reconciliation-report.json")]:
+        if os.path.exists(p):
+            report_path = p
+            break
+    if report_path:
+        try:
+            with open(report_path) as f:
+                report_data = json.load(f)
+            hs = report_data.get("healthyScenario", {})
+            if hs.get("passed") and hs.get("status") and hs["status"] != "balanced":
+                details.append({"type": "healthy_not_balanced", "detail": f"healthyScenario passed but status={hs['status']}", "severity": "info"})
+        except:
+            pass
+
+    # 10. Summary file exists
     if summary_path and not os.path.exists(summary_path):
         issues.append({"type": "summary_missing", "detail": f"summary.md not found at {summary_path}", "severity": "critical"})
 

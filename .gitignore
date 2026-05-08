@@ -1,4 +1,8 @@
-plans.db
+# ATM runtime state — not portable between machines
+.atm/state.db
+.atm/logs/
+
+# Test artifacts
+tmp/
 __pycache__/
 *.pyc
-.DS_Store
