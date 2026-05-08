@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 [![SQLite](https://img.shields.io/badge/db-sqlite-003b57)]()
-[![Tests](https://img.shields.io/badge/tests-27%2F27-green)]()
+[![Tests](https://img.shields.io/badge/tests-54%2F54-green)]()
 
 A SQLite-backed gate runner for AI agents. Prevents fake `done` by enforcing gates, evidence, and verdicts through deterministic Python, not agent prose.
 
@@ -36,7 +36,10 @@ src/
 └── status_agent.py     # (existing)
 .atm/state.db           # SQLite database (auto-created)
 .atm/logs/<run-id>/     # Command run logs
-tests/test_gateboard.py # 27 tests
+tests/test_gateboard.py   # 32 unit tests
+tests/test_cli.py          # 14 CLI command tests
+tests/test_audit_cli.py    # 8 audit contradiction tests
+Total: 54 tests, 0 failures expected.
 bin/atm                 # CLI wrapper
 ```
 
@@ -254,7 +257,9 @@ python3 src/demo_flow.py
 
 ```bash
 python3 tests/test_gateboard.py
-# 27 tests, all pass
+python3 tests/test_cli.py
+python3 tests/test_audit_cli.py
+# 54 tests, 0 failures
 ```
 
 Covers:
@@ -325,6 +330,9 @@ The standard becomes a **constitution**. ATM becomes the **court**.
 | `src/gateboard.py` | Gate ORM, CLI logic, schema (20KB) |
 | `src/gate_agent.py` | CLI entry point (5KB) |
 | `src/demo_flow.py` | End-to-end demo (3.5KB) |
-| `tests/test_gateboard.py` | 27 tests (5KB) |
+| `tests/test_gateboard.py` | 32 unit tests (7KB) | |
+|---|---|---|---|
+| `tests/test_cli.py` | 14 CLI command tests (3KB) | |
+| `tests/test_audit_cli.py` | 8 audit contradiction tests (3KB) | |
 | `bin/atm` | Shell wrapper |
 | `.atm/state.db` | SQLite database (auto) |
