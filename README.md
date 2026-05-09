@@ -4,9 +4,68 @@
 [![SQLite](https://img.shields.io/badge/db-sqlite-003b57)]()
 [![Tests](https://img.shields.io/badge/tests-54%2F54-green)]()
 
-A SQLite-backed gate runner for AI agents. Prevents fake `done` by enforcing gates, evidence, and verdicts through deterministic Python, not agent prose.
+## What is ATM in one sentence?
 
-Built from lessons learned across 4 autonomous feature deliveries (PvP Arena, Missions & Quests, Tournament Mini-League, Tournament Podium Moment).
+**ATM prevents AI agents from claiming "done" when they aren't.**
+
+It's a gate runner: a CLI that enforces build, typecheck, E2E, screenshots, and evidence checks through deterministic Python, not agent promises. If a gate fails, ATM refuses `done`. The agent cannot override it.
+
+---
+
+### The Problem It Solves
+
+Autonomous agents (Hermes, Codex, Claude Code, OpenCode) are great at writing code but terrible at being their own auditor. They repeatedly say `done` when:
+- Build/typecheck failed silently
+- Evidence files are absent
+- E2E used soft assertions or API shortcuts
+- Screenshots exist but were never visually reviewed
+- Final reports contradict repo state
+
+This is not a prompting problem. It's a **runtime** problem. ATM is the **objective auditor** that sits between the agent and the `done` declaration.
+
+---
+
+### How It Fits In
+
+```
+PUFF (control plane)
+  ↓ launches
+Agent (Hermes/Codex/OpenCode)
+  ↓ orchestrates
+ATM (gate runner)   ← YOU ARE HERE
+  ↓ enforces
+Gold Standard (constitution)
+    57KB, 405 mandatory steps
+    github.com/Wendigooor/puff/.../AUTONOMOUS_DELIVERY_GOLD_STANDARD.md
+```
+
+ATM enforces the [Autonomous Delivery Gold Standard](https://github.com/Wendigooor/puff/blob/main/evidence/pvp-arena-season-1/AUTONOMOUS_DELIVERY_GOLD_STANDARD.md) (PUFF repo). See [`GOLD_STANDARD.md`](GOLD_STANDARD.md) for the full map.
+
+---
+
+### Why SQLite?
+
+Every gate transition, evidence attachment, and command run is stored in an append-only event log. Verdicts are **computed from gate state**, not written by the agent. If the agent says `done` but a critical gate is still `pending`, ATM's verdict wins over the agent's prose.
+
+---
+
+### Quick Start
+
+```bash
+# 1. Full demo (5 seconds)
+python3 src/demo_flow.py
+
+# 2. Real use
+atm init-run --id my-feature --profile demo --contract ORIGINAL_CONTRACT.md
+atm import-gates --profile demo
+atm next                    # → "build.production"
+atm run --gate build.production --command 'npm run build'
+atm pass --gate e2e.passed --evidence screenshots/01.png
+atm verify
+atm verdict
+atm prepare-review --id my-feature
+atm complete-review --id my-feature
+```
 
 ---
 
