@@ -18,9 +18,7 @@ Verdict (sentence)
 
 ## Source
 
-The Gold Standard lives in the **PUFF** repository ([github.com/Wendigooor/puff](https://github.com/Wendigooor/puff)) — a collection of autonomous feature delivery experiments where ATM was battle-tested. PUFF is not a dependency or required runtime; it's the upstream research project that produced the standard ATM enforces.
-
-Original: [AUTONOMOUS_DELIVERY_GOLD_STANDARD.md](https://github.com/Wendigooor/puff/blob/main/evidence/pvp-arena-season-1/AUTONOMOUS_DELIVERY_GOLD_STANDARD.md)
+The Gold Standard is an internal autonomous delivery convention — 57KB, 405 mandatory steps distilled from real feature delivery experiments. It defines what "done" means for agentic work.
 
 ## How ATM Implements the Gold Standard
 

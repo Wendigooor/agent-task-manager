@@ -34,12 +34,10 @@ Agent (Hermes/Codex/OpenCode)
   ↓ orchestrates
 ATM (gate runner)   ← YOU ARE HERE
   ↓ enforces
-Gold Standard (constitution)
-    57KB, 405 mandatory steps
-    github.com/Wendigooor/puff/.../AUTONOMOUS_DELIVERY_GOLD_STANDARD.md
+Gold Standard (constitution — internal convention, 57KB, 405 steps)
 ```
 
-ATM enforces the [Autonomous Delivery Gold Standard](https://github.com/Wendigooor/puff/blob/main/evidence/pvp-arena-season-1/AUTONOMOUS_DELIVERY_GOLD_STANDARD.md) (PUFF repo). See [`GOLD_STANDARD.md`](GOLD_STANDARD.md) for the full map.
+ATM enforces an internal autonomous delivery convention (the Gold Standard — 57KB, 405 mandatory steps). See [`GOLD_STANDARD.md`](GOLD_STANDARD.md) for the full map.
 
 ---
 
