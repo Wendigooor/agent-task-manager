@@ -1,6 +1,6 @@
 """Gateboard — Gate state machine, evidence tracking, and verdict computation for ATM."""
 
-import sqlite3, json, os, hashlib, time, subprocess
+import sqlite3, json, os, hashlib, time, subprocess, sys
 from datetime import datetime
 
 DB_DIR = os.environ.get("ATM_DB_DIR", os.path.join(os.path.dirname(__file__), "..", ".atm"))
@@ -719,3 +719,353 @@ def cmd_export(run_id, output_dir):
     with open(path, "w") as f:
         json.dump(export, f, indent=2)
     return {"exported": True, "path": path}
+
+
+# ── Review Lifecycle Commands (ATM v0.7.0) ──────────────────────────────
+
+def _review_bundle_path(run_id):
+    """Resolve review-bundle directory for a run."""
+    return os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "review-bundle")
+
+
+def _evidence_path(run_id):
+    return os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence")
+
+
+def _run_review_bundle_generator(run_id):
+    """Attempt to run review-bundle-generator. Not required — bundle may already exist."""
+    for candidate in (
+        os.path.expanduser("~/.hermes/skills/dogfood/puff-hermes/scripts/review-bundle-generator.py"),
+        os.path.join(PROJECT_ROOT, "scripts", "review-bundle-generator.py"),
+        os.path.join(os.path.dirname(PROJECT_ROOT), "puff-hermes", "scripts", "review-bundle-generator.py"),
+    ):
+        if os.path.exists(candidate):
+            try:
+                result = subprocess.run(
+                    [sys.executable, candidate, "--id", run_id, "--project-root", PROJECT_ROOT],
+                    capture_output=True, text=True, timeout=30
+                )
+                return {"ran": True, "path": candidate, "output": result.stdout.strip(), "error": result.stderr.strip() if result.returncode != 0 else None}
+            except Exception as e:
+                return {"ran": False, "error": str(e)}
+    return {"ran": False, "reason": "no review-bundle-generator found"}
+
+
+def cmd_prepare_review(run_id):
+    """Prepare review: export + audit + generate bundle + validate manifest.
+
+    This is NOT optional prose. A run must prepare-review before complete-review.
+    """
+    steps = []
+
+    # Step 1: Export
+    ev_path = _evidence_path(run_id)
+    exp = cmd_export(run_id, ev_path)
+    steps.append({"step": "export", "ok": exp.get("exported"), "detail": exp.get("path", "")})
+
+    # Step 2: Audit
+    audit = cmd_audit(run_id)
+    steps.append({"step": "audit", "ok": audit.get("pass"), "detail": f"{audit.get('passed_gates', 0)}/{audit.get('gate_count', 0)} passed, {audit.get('critical_issues', 0)} critical"})
+
+    # Step 3: Review bundle generator
+    bg = _run_review_bundle_generator(run_id)
+    steps.append({"step": "bundle-generator", "ok": bg.get("ran"), "detail": bg.get("output") or bg.get("reason") or bg.get("error", "unknown")})
+
+    # Step 4: Validate bundle manifest
+    bundle_path = _review_bundle_path(run_id)
+    manifest_path = os.path.join(bundle_path, "REVIEW_BUNDLE_MANIFEST.md")
+    errors = []
+    if not os.path.exists(bundle_path):
+        errors.append("review-bundle directory not found")
+    if not os.path.exists(manifest_path):
+        errors.append("REVIEW_BUNDLE_MANIFEST.md not found")
+    else:
+        # Check for missing (❌) files in manifest
+        with open(manifest_path) as f:
+            content = f.read()
+        missing_lines = [l.strip() for l in content.split("\n") if "❌" in l]
+        if missing_lines:
+            for ml in missing_lines:
+                errors.append(f"missing in bundle: {ml}")
+    steps.append({"step": "validate-manifest", "ok": len(errors) == 0, "detail": "; ".join(errors) if errors else "all files present"})
+
+    ok = all(s["ok"] for s in steps)
+    return {
+        "run_id": run_id,
+        "pass": ok,
+        "steps": steps,
+        "audit": audit,
+        "bundle_path": str(bundle_path),
+    }
+
+
+def cmd_review_status(run_id):
+    """Check what review artifacts exist and their status.
+
+    Does not make assumptions about which reviewer produced them.
+    Validates only that required artifacts exist by convention.
+    """
+    ev = _evidence_path(run_id)
+    bundle = _review_bundle_path(run_id)
+
+    artifacts = {}
+
+    # Bundle
+    artifacts["review-bundle"] = os.path.exists(os.path.join(bundle, "REVIEW_BUNDLE_MANIFEST.md"))
+
+    # Find the LATEST text review verdict file
+    # Supports version-suffixed files: codex-reviewer-verdict.md, -2.md, -3.md, -final.md
+    text_review_paths = []
+    base_names = ["codex-reviewer-verdict", "reviewer-verdict"]
+    for base in base_names:
+        for version in ("", "-2", "-3", "-final", "-re-review"):
+            p = os.path.join(ev, f"{base}{version}.md")
+            if os.path.exists(p):
+                text_review_paths.append(p)
+
+    text_review = None
+    # Pick the LAST one (highest version suffix, or latest timestamp if same name)
+    if text_review_paths:
+        # Sort by file modification time, newest first
+        text_review_paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        text_review = text_review_paths[0]
+    artifacts["text-review"] = text_review
+    artifacts["text-review-all"] = text_review_paths
+
+    # Parse verdict from the LATEST text review
+    # Look for the final **Status:** line for accurate parsing
+    verdict = None
+    if text_review:
+        with open(text_review) as f:
+            content = f.read()
+        content_lower = content.lower()
+        # First try to find the explicit **Status:** line
+        for line in content.split("\n"):
+            if "**status" in line.lower() or "## status" in line.lower():
+                line_lower = line.lower()
+                if "reject" in line_lower:
+                    verdict = "reject"
+                    break
+                elif "requires_fix" in line_lower:
+                    verdict = "requires_fix"
+                    break
+                elif "approve" in line_lower:
+                    verdict = "approve"
+                    break
+        # Fallback: substring match (more prone to false positives)
+        if verdict is None:
+            if "reject" in content_lower:
+                verdict = "reject"
+            elif "requires_fix" in content_lower:
+                verdict = "requires_fix"
+            elif "approve" in content_lower:
+                verdict = "approve"
+
+    # Vision review
+    vision_review_paths = [
+        os.path.join(ev, "codex-vision-review.md"),
+        os.path.join(ev, "vision-review.md"),
+    ]
+    vision_review = None
+    vision_skipped = False
+    for p in vision_review_paths:
+        if os.path.exists(p):
+            with open(p) as f:
+                c = f.read().lower()
+            if "skipped" in c:
+                vision_skipped = True
+            vision_review = p
+            break
+    artifacts["vision-review"] = vision_review
+    artifacts["vision-review-skipped"] = vision_skipped
+
+    # Fix response
+    fix_responses = [
+        os.path.join(ev, "codex-reviewer-fix-response.md"),
+        os.path.join(ev, "reviewer-fix-response.md"),
+    ]
+    fix_response = None
+    for p in fix_responses:
+        if os.path.exists(p):
+            fix_response = p
+            break
+    artifacts["fix-response"] = fix_response
+
+    # Screenshots
+    screenshots_dir = os.path.join(ev, "screenshots")
+    screenshots = []
+    if os.path.exists(screenshots_dir):
+        screenshots = sorted([f for f in os.listdir(screenshots_dir) if f.endswith(".png")])
+    artifacts["screenshots"] = screenshots
+    artifacts["screenshot_count"] = len(screenshots)
+
+    # ATM audit
+    audit = cmd_audit(run_id)
+    artifacts["audit-pass"] = audit.get("pass")
+
+    # Bundle manifest status
+    manifest_path = os.path.join(bundle, "REVIEW_BUNDLE_MANIFEST.md")
+    bundle_ok = False
+    if os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            content = f.read()
+        bundle_ok = "❌" not in content
+    artifacts["bundle-complete"] = bundle_ok
+
+    # Auto-assess completeness
+    blocking = []
+    notes = []
+
+    if not artifacts["review-bundle"]:
+        blocking.append("review-bundle not generated")
+    if not bundle_ok:
+        blocking.append("review-bundle has missing files")
+    if not text_review:
+        blocking.append("text review not found")
+
+    # Verdict-based assessment
+    if verdict in ("reject", "requires_fix"):
+        if fix_response:
+            notes.append(f"latest verdict is {verdict}, fix-response exists — ready for re-review")
+            # Still blocking: fix-response is executor's claim, not approval
+            blocking.append(f"latest reviewer verdict is '{verdict}' — needs re-review approval")
+        else:
+            blocking.append(f"latest reviewer verdict is '{verdict}' and no fix-response")
+    elif verdict == "approve":
+        notes.append("latest reviewer verdict is approve")
+    elif verdict is None and text_review:
+        notes.append("could not parse verdict from text review")
+
+    if screenshots and not vision_review:
+        blocking.append("screenshots exist but vision review not found")
+    if not audit.get("pass"):
+        blocking.append("ATM audit does not pass")
+    if not artifacts["review-bundle"]:
+        blocking.append("review bundle not generated")
+
+    ready_for_complete = (
+        verdict == "approve"
+        and bundle_ok
+        and audit.get("pass")
+        and (not screenshots or vision_review)
+    )
+
+    return {
+        "run_id": run_id,
+        "artifacts": artifacts,
+        "verdict": verdict,
+        "blocking": blocking,
+        "notes": notes,
+        "pass": len(blocking) == 0,
+        "ready_for_complete": ready_for_complete,
+    }
+
+
+def cmd_complete_review(run_id):
+    """Complete review: validate all artifacts, re-audit, and return final status.
+
+    If complete-review fails, final status CANNOT be done/pass.
+    This is the anti-false-done lock.
+
+    Critical rule: fix-response is executor's claim, NOT approval.
+    Only re-approval by reviewer unlocks DONE.
+    """
+    # Step 1: Ensure prepare-review was done
+    prepare = cmd_prepare_review(run_id)
+    if not prepare.get("pass"):
+        return {
+            "run_id": run_id,
+            "pass": False,
+            "verdict": "prepare_failed",
+            "prepare": prepare,
+            "errors": ["prepare-review failed — review lifecycle incomplete"],
+        }
+
+    # Step 2: Review status — infrastructure checks only
+    # (verdict logic is determined independently below)
+    status = cmd_review_status(run_id)
+    errors = []
+    infra_blockers = ["review-bundle not generated", "review-bundle has missing files",
+                      "text review not found", "screenshots exist but vision review not found",
+                      "ATM audit does not pass"]
+    for b in status.get("blocking", []):
+        for ib in infra_blockers:
+            if ib in b:
+                errors.append(b)
+                break
+
+    # Step 3: Re-audit after review
+    audit = cmd_audit(run_id)
+
+    # Step 4: Parse reviewer verdict from LATEST review
+    verdict = status.get("verdict", "unknown")
+    has_fix_response = status["artifacts"].get("fix-response") is not None
+    text_review = status["artifacts"].get("text-review")
+
+    # Step 5: Determine final verdict
+
+    # No text review at all → incomplete
+    if not text_review:
+        final_verdict = "review_incomplete"
+        errors.append("no text review found — cannot complete review")
+
+    # Latest reviewer says approve → DONE path
+    elif verdict == "approve":
+        final_verdict = "review_passed"
+
+    # Latest reviewer says reject/requires_fix → BLOCKED
+    # fix-response alone is not enough — needs re-review
+    elif verdict == "reject":
+        if has_fix_response:
+            final_verdict = "ready_for_re_review"
+            errors.append("latest reviewer verdict is 'reject' — fix-response written but needs re-review approval")
+        else:
+            final_verdict = "review_rejected"
+            errors.append("reviewer rejected and no fix-response")
+
+    elif verdict == "requires_fix":
+        if has_fix_response:
+            final_verdict = "ready_for_re_review"
+            errors.append("reviewer requires fix — fix-response written but needs re-review approval")
+        else:
+            final_verdict = "fix_required"
+            errors.append("reviewer requires fix and no fix-response")
+
+    else:
+        final_verdict = "review_partial"
+        if text_review:
+            errors.append(f"could not parse reviewer verdict from {text_review}")
+
+    # Check screenshots + vision
+    if status["artifacts"].get("screenshot_count", 0) > 0 and not status["artifacts"].get("vision-review"):
+        e = "screenshots exist but vision review not found"
+        if e not in errors:
+            errors.append(e)
+
+    # Check audit
+    if not audit.get("pass"):
+        errors.append("final audit fails")
+        if final_verdict not in ("review_incomplete",):
+            final_verdict = "audit_failed"
+
+    ok = len(errors) == 0
+
+    # Recommendation
+    if ok:
+        rec = "DONE"
+    elif final_verdict == "ready_for_re_review":
+        rec = f"RE-REVIEW REQUIRED: {verdict} → fix-response → run reviewer again"
+    else:
+        rec = f"BLOCKED: {'; '.join(errors)}"
+
+    return {
+        "run_id": run_id,
+        "pass": ok,
+        "verdict": final_verdict,
+        "review_verdict": verdict,
+        "has_fix_response": has_fix_response,
+        "audit_pass": audit.get("pass"),
+        "errors": errors,
+        "status": status,
+        "recommendation": rec,
+    }

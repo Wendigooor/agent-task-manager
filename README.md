@@ -6,7 +6,7 @@
 
 A SQLite-backed gate runner for AI agents. Prevents fake `done` by enforcing gates, evidence, and verdicts through deterministic Python, not agent prose.
 
-Built from lessons learned across 3 autonomous feature deliveries (PvP Arena, Missions & Quests, Tournament Mini-League, Sprint Pass).
+Built from lessons learned across 4 autonomous feature deliveries (PvP Arena, Missions & Quests, Tournament Mini-League, Tournament Podium Moment).
 
 ---
 
@@ -183,6 +183,21 @@ atm verdict
 
 atm export --out <dir>
     Export run state as JSON for audit.
+
+atm prepare-review --id <run>
+    Export + audit + bundle generator + validate manifest.
+    First step of review lifecycle. Required before complete-review.
+
+atm review-status --id <run>
+    Check all review artifacts: bundle completeness, text review, vision review,
+    fix-response, audit status. Parses latest reviewer verdict (by mtime,
+    supports -2, -3, -final suffixes).
+
+atm complete-review --id <run>
+    Anti-false-done lock. Validates prepare-review + review-status + re-audit.
+    Critical rule: fix-response is NOT approval. DONE requires latest reviewer
+    verdict to be approve, not just a fix-response.
+    Verdicts: review_passed, ready_for_re_review, review_rejected, review_incomplete.
 ```
 
 ## Verdict Logic
@@ -287,7 +302,15 @@ Planned but not implemented (current E2E scripts already use hard assertions):
 - `gate-ledger-summary.md` auto-generation from export JSON
 - Reproduction command list in export
 
-### v0.7 — Optional Nice-To-Have
+### v0.7 — Review Lifecycle (Done)
+- `atm prepare-review` — export + audit + bundle generator + validate manifest
+- `atm review-status` — check all review artifacts, parse latest verdict
+- `atm complete-review` — anti-false-done lock: fix-response ≠ approval
+- Key rule: reject + fix-response = ready_for_re_review, not DONE
+- Latest verdict wins (supports -2, -3, -final version suffixes)
+- Bundle generator includes `reviewer-outputs/` for re-review context
+
+### v0.8 — Optional Nice-To-Have
 (Only if v0.1-v0.6 are stable)
 - Tiny HTML report with gate status table
 - MCP wrapper for agent integration

@@ -67,12 +67,17 @@ def main():
     sp = _sp("evidence", "Attach evidence")
     sp.add_argument("--gate", required=True); sp.add_argument("--file"); sp.add_argument("--note")
 
-    # status / verify / verify-integrity / verdict / doctor / smoke / export
+    # status / verify / verify-integrity / verdict / doctor / smoke / export / review
     for cmd in ("status", "verify", "verify-integrity", "verdict", "audit", "smoke"):
         _sp(cmd, None)
 
     # export
     sp = _sp("export", "Export run"); sp.add_argument("--out", required=True)
+
+    # review lifecycle
+    sp = _sp("prepare-review", "Export + audit + bundle + validate manifest")
+    sp = _sp("review-status", "Check all review artifacts and their status")
+    sp = _sp("complete-review", "Validate review lifecycle — blocks done if fails")
 
     # doctor (no --id)
     sp = sub.add_parser("doctor", help="Check ATM environment"); _add_json(sp)
@@ -97,6 +102,9 @@ def main():
             "audit": lambda: cmd_audit(rid),
             "verdict": lambda: cmd_verdict(rid),
             "export": lambda: cmd_export(rid, args.out),
+            "prepare-review": lambda: cmd_prepare_review(rid),
+            "review-status": lambda: cmd_review_status(rid),
+            "complete-review": lambda: cmd_complete_review(rid),
             "doctor": cmd_doctor,
             "smoke": lambda: cmd_smoke(rid, args),
         }
@@ -165,6 +173,42 @@ def _human(cmd, r):
                 print(f"  Issue: {i}")
     elif cmd == "export":
         print(f"Exported: {r.get('path')}")
+    elif cmd == "prepare-review":
+        print(f"PREPARE REVIEW: {r.get('run_id')}")
+        for s in r.get("steps", []):
+            print(f"  {'✅' if s.get('ok') else '❌'} {s['step']}: {s.get('detail', '')}")
+        print(f"\n  Overall: {'PASS ✅' if r.get('pass') else 'FAIL ❌'}")
+    elif cmd == "review-status":
+        print(f"REVIEW STATUS: {r.get('run_id')}")
+        arts = r.get("artifacts", {})
+        print(f"  Bundle: {'✅' if arts.get('review-bundle') else '❌'} {'(complete)' if arts.get('bundle-complete') else '(incomplete)' if arts.get('review-bundle') else ''}")
+        print(f"  Text review: {'✅ ' + str(arts.get('text-review', '')) if arts.get('text-review') else '❌ not found'}")
+        print(f"  Verdict: {r.get('verdict', 'none')}")
+        print(f"  Vision review: {'✅ ' + str(arts.get('vision-review', '')) if arts.get('vision-review') else '❌ not found'} {'(skipped)' if arts.get('vision-review-skipped') else ''}")
+        print(f"  Screenshots: {arts.get('screenshot_count', 0)} PNGs")
+        print(f"  Fix response: {'✅' if arts.get('fix-response') else '❌'} {'(exists)' if arts.get('fix-response') else 'not found'}")
+        print(f"  Audit: {'PASS ✅' if arts.get('audit-pass') else 'FAIL ❌'}")
+        if r.get("blocking"):
+            print(f"\n  Blocking ({len(r['blocking'])}):")
+            for b in r["blocking"]:
+                print(f"    🔴 {b}")
+        if r.get("notes"):
+            print(f"\n  Notes:")
+            for n in r["notes"]:
+                print(f"    ℹ️ {n}")
+        print(f"  Status: {'READY ✅' if r.get('pass') else 'NOT READY ❌'}")
+    elif cmd == "complete-review":
+        print(f"COMPLETE REVIEW: {r.get('run_id')}")
+        print(f"  Verdict: {r.get('verdict')}")
+        print(f"  Review verdict: {r.get('review_verdict') or 'unknown'}")
+        print(f"  Fix response: {'YES ✅' if r.get('has_fix_response') else 'NO ❌'}")
+        print(f"  Final audit: {'PASS ✅' if r.get('audit_pass') else 'FAIL ❌'}")
+        if r.get("errors"):
+            print(f"\n  Errors ({len(r['errors'])}):")
+            for e in r["errors"]:
+                print(f"    🔴 {e}")
+        print(f"\n  Recommendation: {r.get('recommendation', 'unknown')}")
+        print(f"  {'✅ DONE' if r.get('pass') else '❌ BLOCKED'}")
     else:
         print(json.dumps(r, indent=2))
 
