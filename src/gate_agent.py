@@ -79,6 +79,10 @@ def main():
     sp = _sp("review-status", "Check all review artifacts and their status")
     sp = _sp("complete-review", "Validate review lifecycle — blocks done if fails")
 
+    # deliver
+    sp = _sp("deliver", "Full runtime-owned review lifecycle — only valid path to demo_done")
+    sp.add_argument("--profile", default="demo", help="Delivery profile (demo, technical)")
+
     # doctor (no --id)
     sp = sub.add_parser("doctor", help="Check ATM environment"); _add_json(sp)
 
@@ -105,6 +109,7 @@ def main():
             "prepare-review": lambda: cmd_prepare_review(rid),
             "review-status": lambda: cmd_review_status(rid),
             "complete-review": lambda: cmd_complete_review(rid),
+            "deliver": lambda: cmd_deliver(rid, args.profile),
             "doctor": cmd_doctor,
             "smoke": lambda: cmd_smoke(rid, args),
         }
@@ -207,8 +212,25 @@ def _human(cmd, r):
             print(f"\n  Errors ({len(r['errors'])}):")
             for e in r["errors"]:
                 print(f"    🔴 {e}")
-        print(f"\n  Recommendation: {r.get('recommendation', 'unknown')}")
+        print(f"\\n  Recommendation: {r.get('recommendation', 'unknown')}")
         print(f"  {'✅ DONE' if r.get('pass') else '❌ BLOCKED'}")
+    elif cmd == "deliver":
+        print(f"DELIVER: {r.get('run_id')} | profile: {r.get('profile')}")
+        print(f"  Status: {r.get('status', 'unknown')}")
+        for step_name, step_data in r.get("steps", {}).items():
+            st = step_data.get("status", "?")
+            icon = "✅" if st == "pass" else ("⏭️" if st == "skipped" else "❌")
+            detail = step_data.get("detail", "")
+            verdict = step_data.get("verdict", "")
+            extra = f" — {detail}" if detail else ""
+            extra += f" (verdict: {verdict})" if verdict else ""
+            print(f"  {icon} {step_name}: {st}{extra}")
+        if r.get("errors"):
+            print(f"\\n  Errors ({len(r['errors'])}):")
+            for e in r["errors"]:
+                print(f"    🔴 {e}: {DELIVER_FAIL_REASONS.get(e, 'unknown')}")
+        if r.get("recommendation"):
+            print(f"\\n  {r['recommendation']}")
     else:
         print(json.dumps(r, indent=2))
 

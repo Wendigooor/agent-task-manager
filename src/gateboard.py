@@ -1,6 +1,8 @@
 """Gateboard — Gate state machine, evidence tracking, and verdict computation for ATM."""
 
+from __future__ import annotations
 import sqlite3, json, os, hashlib, time, subprocess, sys
+from typing import Optional
 from datetime import datetime
 
 DB_DIR = os.environ.get("ATM_DB_DIR", os.path.join(os.path.dirname(__file__), "..", ".atm"))
@@ -1068,4 +1070,286 @@ def cmd_complete_review(run_id):
         "errors": errors,
         "status": status,
         "recommendation": rec,
+    }
+
+
+# ── Deliver — Runtime-Owned Review Lifecycle ────────────────────────────────
+
+DELIVER_FAIL_REASONS = {
+    "audit_failed": "ATM audit did not pass",
+    "review_bundle_incomplete": "Review bundle is incomplete or missing",
+    "codex_text_review_missing": "Codex text review artifact not found",
+    "codex_vision_review_missing": "Screenshots exist but Codex vision review not found",
+    "review_rejected": "Latest reviewer verdict is reject/requires_fix",
+    "re_review_required": "Fix-response exists but no newer approve re-review",
+    "invalid_self_review": "Executor and reviewer use the same model family",
+    "complete_review_failed": "Complete-review did not pass",
+    "deliver_not_run": "Deliver was not executed",
+    "codex_reviewer_unavailable": "Codex reviewer script not found",
+}
+
+
+def _resolve_executor_model() -> str:
+    return os.environ.get("ATM_EXECUTOR_MODEL", "unknown")
+
+
+def _resolve_executor_provider() -> str:
+    return os.environ.get("ATM_EXECUTOR_PROVIDER", "unknown")
+
+
+def _get_reviewer_model_from_verdict(verdict_path: str) -> str:
+    if not verdict_path or not os.path.exists(verdict_path):
+        return "unknown"
+    try:
+        with open(verdict_path) as f:
+            for line in f:
+                if line.startswith("#") and "model" in line.lower():
+                    return line.strip().lstrip("# ").strip()
+    except:
+        pass
+    return "unknown"
+
+
+def _model_family(model_str: str) -> str:
+    m = model_str.lower().strip()
+    if "deepseek" in m:
+        return "deepseek"
+    if "gpt" in m or "o1" in m or "o3" in m or "o4" in m:
+        return "openai"
+    if "claude" in m or "sonnet" in m or "opus" in m:
+        return "anthropic"
+    if "gemini" in m:
+        return "google"
+    if "llama" in m or "qwen" in m or "codellama" in m:
+        return "open_source"
+    return m.split("/")[0] if "/" in m else m.split("-")[0] if "-" in m else m
+
+
+def _find_codex_reviewer_script() -> str | None:
+    candidates = [
+        os.path.expanduser("~/.hermes/skills/software-development/codex-reviewer/scripts/codex-reviewer.sh"),
+        os.path.join(PROJECT_ROOT, "scripts", "codex-reviewer.sh"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def _run_codex_review(run_id: str, project_root: str) -> dict:
+    script = _find_codex_reviewer_script()
+    if not script:
+        return {"ok": False, "error": "codex_reviewer_unavailable", "detail": "Codex reviewer script not found"}
+    try:
+        env = os.environ.copy()
+        env["ATM_PROJECT_ROOT"] = project_root
+        result = subprocess.run(
+            ["bash", script, run_id, project_root],
+            capture_output=True, text=True, timeout=300,
+            env=env,
+        )
+        ev_path = _evidence_path(run_id)
+        text_verdict = None
+        vision_verdict = None
+        for base in ["codex-reviewer-verdict"]:
+            for version in ("", "-2", "-3", "-final", "-re-review"):
+                p = os.path.join(ev_path, f"{base}{version}.md")
+                if os.path.exists(p):
+                    text_verdict = p
+        vision_v = os.path.join(ev_path, "codex-vision-review.md")
+        if os.path.exists(vision_v):
+            vision_verdict = vision_v
+        return {
+            "ok": text_verdict is not None or result.returncode == 0,
+            "text_verdict": text_verdict,
+            "vision_verdict": vision_verdict,
+            "returncode": result.returncode,
+            "detail": f"Codex text: {'ok' if text_verdict else 'missing'}, vision: {'ok' if vision_verdict else 'missing'}",
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "codex_timeout", "detail": "Codex review timed out after 300s"}
+    except Exception as e:
+        return {"ok": False, "error": "codex_error", "detail": str(e)}
+
+
+def _parse_review_verdict(verdict_path: str) -> str | None:
+    if not verdict_path or not os.path.exists(verdict_path):
+        return None
+    with open(verdict_path) as f:
+        content = f.read()
+    for line in content.split("\n"):
+        stripped = line.strip().lower()
+        if stripped.startswith("**status**") or stripped.startswith("## status") or stripped.startswith("status:"):
+            if ":" in line:
+                val = line.split(":", 1)[1].strip().lower().rstrip(".")
+                if val in ("approve_technical_done", "approve_demo_done", "approved", "pass", "approve"):
+                    return "approve"
+                if val in ("reject", "requires_fix", "failed", "technical_partial", "demo_partial"):
+                    return val
+    return None
+
+
+def _get_latest_review_verdict(run_id: str) -> dict:
+    ev = _evidence_path(run_id)
+    text_review_paths = []
+    for base in ["codex-reviewer-verdict", "reviewer-verdict"]:
+        for version in ("", "-2", "-3", "-final", "-re-review"):
+            p = os.path.join(ev, f"{base}{version}.md")
+            if os.path.exists(p):
+                text_review_paths.append(p)
+    if not text_review_paths:
+        return {"found": False, "verdict": None, "path": None}
+    text_review_paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    latest = text_review_paths[0]
+    verdict = _parse_review_verdict(latest)
+    return {"found": True, "verdict": verdict, "path": latest, "mtime": os.path.getmtime(latest)}
+
+
+def _has_screenshots(run_id: str) -> bool:
+    ev = _evidence_path(run_id)
+    ss_dir = os.path.join(ev, "screenshots")
+    if not os.path.exists(ss_dir):
+        return False
+    return any(f.endswith(".png") for f in os.listdir(ss_dir))
+
+
+def _check_fix_response_older_than_approve(run_id: str) -> tuple:
+    ev = _evidence_path(run_id)
+    fix_responses = [
+        os.path.join(ev, "codex-reviewer-fix-response.md"),
+        os.path.join(ev, "reviewer-fix-response.md"),
+    ]
+    fix_response = None
+    for p in fix_responses:
+        if os.path.exists(p):
+            fix_response = p
+            break
+    if not fix_response:
+        return True, "no fix-response needed"
+    text_review_paths = []
+    for base in ["codex-reviewer-verdict", "reviewer-verdict"]:
+        for version in ("", "-2", "-3", "-final", "-re-review"):
+            p = os.path.join(ev, f"{base}{version}.md")
+            if os.path.exists(p):
+                v = _parse_review_verdict(p)
+                if v == "approve":
+                    text_review_paths.append((p, os.path.getmtime(p)))
+    if not text_review_paths:
+        return False, "fix-response exists but no approve verdict found"
+    text_review_paths.sort(key=lambda x: x[1], reverse=True)
+    latest_approve_path, latest_approve_mtime = text_review_paths[0]
+    fix_mtime = os.path.getmtime(fix_response)
+    if fix_mtime > latest_approve_mtime:
+        return False, f"fix-response ({fix_response}) is newer than latest approve verdict — needs re-review"
+    return True, "fix-response timestamp is valid"
+
+
+def cmd_deliver(run_id: str, profile: str = "demo"):
+    """Full runtime-owned review lifecycle. ONLY valid path to demo_done."""
+    steps = {}
+    errors = []
+
+    # Step 1: Audit
+    audit = cmd_audit(run_id)
+    audit_ok = audit.get("pass", False)
+    steps["audit"] = {"status": "pass" if audit_ok else "fail"}
+    if not audit_ok:
+        errors.append("audit_failed")
+
+    # Step 2: Prepare Review
+    prepare = cmd_prepare_review(run_id)
+    bundle_ok = prepare.get("pass", False)
+    steps["prepare_review"] = {"status": "pass" if bundle_ok else "fail", "detail": str(prepare.get("steps", []))}
+    if not bundle_ok:
+        errors.append("review_bundle_incomplete")
+
+    # Step 3: Run Codex Text Review
+    codex_result = _run_codex_review(run_id, PROJECT_ROOT)
+    text_verdict_path = codex_result.get("text_verdict")
+    steps["codex_text_review"] = {"status": "pass" if text_verdict_path else "fail", "detail": codex_result.get("detail", "")}
+    if not text_verdict_path:
+        errors.append("codex_text_review_missing")
+
+    # Step 4: Codex Vision Review
+    has_ss = _has_screenshots(run_id)
+    vision_verdict_path = codex_result.get("vision_verdict")
+    vision_status = "pass"
+    if has_ss and not vision_verdict_path:
+        vision_status = "fail"
+        errors.append("codex_vision_review_missing")
+    elif not has_ss:
+        vision_status = "skipped"
+    steps["codex_vision_review"] = {"status": vision_status}
+
+    # Step 5: Parse Latest Reviewer Verdict
+    latest = _get_latest_review_verdict(run_id)
+    reviewer_model = _get_reviewer_model_from_verdict(latest.get("path"))
+    verdict = latest.get("verdict")
+    verdict_ok = latest.get("found") and verdict == "approve"
+    steps["review_verdict"] = {"status": "pass" if verdict_ok else "fail", "verdict": verdict}
+    if not latest.get("found"):
+        errors.append("codex_text_review_missing")
+    elif verdict in ("reject", "requires_fix", "failed", None):
+        errors.append("review_rejected")
+
+    # Step 6: Model Diversity
+    executor_model = _resolve_executor_model()
+    executor_family = _model_family(executor_model)
+    reviewer_family = _model_family(reviewer_model) if reviewer_model != "unknown" else executor_family
+    ev_path = _evidence_path(run_id)
+    risk_override = os.path.join(ev_path, "model-diversity-accepted-risk.md")
+    has_risk_override = os.path.exists(risk_override)
+    model_diverse = (executor_family != reviewer_family) or has_risk_override
+    if not model_diverse and profile == "demo":
+        errors.append("invalid_self_review")
+    steps["model_diversity"] = {
+        "status": "pass" if model_diverse else "fail",
+        "executor": {"model": executor_model, "family": executor_family},
+        "reviewer": {"model": reviewer_model, "family": reviewer_family},
+    }
+
+    # Step 7: Fix-response timestamp check
+    fix_ok, fix_reason = _check_fix_response_older_than_approve(run_id)
+    steps["fix_response_check"] = {"status": "pass" if fix_ok else "fail", "detail": fix_reason}
+    if not fix_ok:
+        errors.append("re_review_required")
+
+    # Step 8: Review Status
+    review_status = cmd_review_status(run_id)
+    review_ready = review_status.get("pass", False)
+    steps["review_status"] = {"status": "pass" if review_ready else "fail"}
+    if not review_ready and not any(e in errors for e in ["codex_text_review_missing", "codex_vision_review_missing", "review_rejected"]):
+        errors.append("complete_review_failed")
+
+    # Step 9: Complete Review
+    complete = cmd_complete_review(run_id)
+    complete_ok = complete.get("pass", False)
+    steps["complete_review"] = {"status": "pass" if complete_ok else "fail", "verdict": complete.get("verdict", "unknown")}
+    if not complete_ok and "complete_review_failed" not in errors:
+        errors.append("complete_review_failed")
+
+    # Final
+    ok = len(errors) == 0
+    if ok:
+        final_verdict = "demo_done"
+        recommendation = "DONE"
+    else:
+        final_verdict = errors[0]
+        if final_verdict == "review_rejected":
+            recommendation = "BLOCKED: review rejected — fix findings and re-run atm deliver"
+        elif final_verdict == "re_review_required":
+            recommendation = "RE-REVIEW REQUIRED: fix-response exists but needs newer approve re-review"
+        elif final_verdict == "invalid_self_review":
+            recommendation = f"BLOCKED: same model family for executor ({executor_family}) and reviewer ({reviewer_family}) — use different model"
+        else:
+            recommendation = f"BLOCKED: {'; '.join(errors)}"
+
+    return {
+        "ok": ok,
+        "run_id": run_id,
+        "profile": profile,
+        "status": final_verdict,
+        "steps": steps,
+        "errors": errors,
+        "recommendation": recommendation,
     }
