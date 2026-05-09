@@ -1080,6 +1080,7 @@ DELIVER_FAIL_REASONS = {
     "review_bundle_incomplete": "Review bundle is incomplete or missing",
     "review_artifact_missing": "No review artifact found",
     "review_missing": "No reviewer configured and no artifact exists",
+    "reviewer_script_failed": "Reviewer script exited with non-zero or was not found",
     "review_rejected": "Latest reviewer verdict is reject/requires_fix",
     "re_review_required": "Fix-response exists but no newer approve re-review",
     "same_session_self_review": "Review was written by executor as self-report in same session",
@@ -1124,18 +1125,14 @@ def _parse_frontmatter_field(content: str, field: str) -> str | None:
 
 def _parse_review_verdict_extended(verdict_path: str | None) -> dict:
     """Parse a review artifact file and return structured metadata.
-    
-    Returns:
-    {
-        "found": bool,
-        "status": "approve" | "reject" | "requires_fix" | "partial" | "skipped" | None,
-        "review_mode": "cross_model" | "fresh_context_same_model" | "manual" | "skipped" | None,
-        "reviewer_name": str,
-        "reviewer_model": str,
-        "executor_model": str,
-        "path": str | None,
-        "frontmatter": dict,  # raw frontmatter
-    }
+
+    Supports these Status formats:
+      Status: approve
+      **Status:** approve
+      ## Status
+      approve
+
+    (multi-line: Status on one line, value on the next)
     """
     if not verdict_path or not os.path.exists(verdict_path):
         return {"found": False, "status": None, "review_mode": None,
@@ -1156,30 +1153,34 @@ def _parse_review_verdict_extended(verdict_path: str | None) -> dict:
                     k, v = line.split(":", 1)
                     frontmatter[k.strip().lower()] = v.strip().strip('"').strip("'")
 
-    # Parse Status from **Status:** line
+    # Parse Status — support multiple formats
     status = None
-    for line in content.split("\n"):
-        sl = line.strip().lower()
-        if sl.startswith("**status**") or sl.startswith("## status") or sl.startswith("status:"):
-            if ":" in line:
-                val = line.split(":", 1)[1].strip().lower().rstrip(".")
-                if val in ("approve_technical_done", "approve_demo_done", "approved", "pass", "approve"):
-                    status = "approve"
+    lines = content.split("\n")
+    for i, line in enumerate(lines):
+        sl = line.strip()
+
+        # Format 1: "Status: value" or "**Status:** value" or "## Status value"
+        if ":" in sl:
+            before_colon = sl.split(":", 1)[0].strip().lower().strip("*").strip()
+            if before_colon in ("status", "**status", "## status", "final status"):
+                val = sl.split(":", 1)[1].strip().strip("*").strip().lower().rstrip(".")
+                status = _normalize_status(val)
+                if status:
                     break
-                if val == "reject":
-                    status = "reject"
+
+        # Format 2: "## Status" on one line, "approve" on the next
+        if sl.lower().startswith("## status") or sl.lower().startswith("**status**"):
+            # Check if the status value is on the same line after the heading
+            rest = sl[len("## status"):].strip() if sl.lower().startswith("## status") else sl[len("**status**"):].strip()
+            if rest:
+                status = _normalize_status(rest.lower().rstrip("."))
+                if status:
                     break
-                if val == "requires_fix":
-                    status = "requires_fix"
-                    break
-                if val == "partial":
-                    status = "partial"
-                    break
-                if val == "skipped":
-                    status = "skipped"
-                    break
-                if val == "failed":
-                    status = "reject"
+            # Or on the next line
+            if i + 1 < len(lines):
+                next_val = lines[i + 1].strip().lower().rstrip(".")
+                status = _normalize_status(next_val)
+                if status:
                     break
 
     return {
@@ -1196,17 +1197,37 @@ def _parse_review_verdict_extended(verdict_path: str | None) -> dict:
     }
 
 
+def _normalize_status(val: str) -> str | None:
+    """Normalize a status string to a canonical value."""
+    val = val.strip().lower().rstrip(".")
+    if val in ("approve_technical_done", "approve_demo_done", "approved", "pass", "approve"):
+        return "approve"
+    if val == "reject":
+        return "reject"
+    if val == "requires_fix":
+        return "requires_fix"
+    if val == "partial":
+        return "partial"
+    if val == "skipped":
+        return "skipped"
+    if val == "failed":
+        return "reject"
+    return None
+
+
 def _classify_review_mode(parsed: dict) -> str:
     """Classify review quality from artifact metadata.
-    
-    Returns one of: cross_model, fresh_context_same_model, manual, skipped, unknown
+
+    Returns one of: cross_model, fresh_context_same_model, same_session_self_review,
+                    manual, skipped, unknown
     """
     if not parsed.get("found"):
         return "missing"
 
     # If explicitly declared, trust it
     explicit = parsed.get("review_mode")
-    if explicit and explicit in ("cross_model", "fresh_context_same_model", "manual", "skipped"):
+    if explicit and explicit in ("cross_model", "fresh_context_same_model",
+                                  "same_session_self_review", "manual", "skipped"):
         return explicit
 
     # Infer from models
@@ -1216,7 +1237,7 @@ def _classify_review_mode(parsed: dict) -> str:
     if executor == "unknown" or reviewer == "unknown":
         return "manual"  # Can't verify → treat as manual
 
-    # Check if same model (simple string comparison)
+    # same model → fresh_context (not same_session unless explicitly declared)
     if executor == reviewer:
         return "fresh_context_same_model"
     if executor.split("/")[-1] == reviewer.split("/")[-1]:
@@ -1226,21 +1247,27 @@ def _classify_review_mode(parsed: dict) -> str:
 
 
 def _get_latest_review_artifact(run_id: str) -> dict:
-    """Find the latest review artifact by mtime across all known naming conventions."""
-    ev = _evidence_path(run_id)
-    paths = []
-    for base in ["reviewer-verdict", "codex-reviewer-verdict", "review", "review-result"]:
-        for version in ("", "-2", "-3", "-final", "-re-review"):
-            p = os.path.join(ev, f"{base}{version}.md")
-            if os.path.exists(p):
-                paths.append(p)
+    """Find the latest review artifact by mtime.
 
-    # Also check review-bundle
+    Searches evidence/ and review-bundle/ for any markdown file matching
+    patterns: *verdict*.md, *review*.md, *result*.md
+    """
+    ev = _evidence_path(run_id)
     bundle = _review_bundle_path(run_id)
-    for base in ["reviewer-verdict", "review", "review-result"]:
-        p = os.path.join(bundle, f"{base}.md")
-        if os.path.exists(p):
-            paths.append(p)
+    paths = []
+
+    for search_dir in [ev, bundle]:
+        if not os.path.exists(search_dir):
+            continue
+        try:
+            for f in os.listdir(search_dir):
+                if f.endswith(".md") and any(kw in f.lower() for kw in
+                    ["verdict", "review", "result"]):
+                    full = os.path.join(search_dir, f)
+                    if os.path.isfile(full):
+                        paths.append(full)
+        except:
+            pass
 
     if not paths:
         return {"found": False, "status": None, "review_mode": None,
@@ -1340,11 +1367,19 @@ def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None 
       - Status: approve/reject/requires_fix line
 
     If --reviewer-script is provided, runs it.
-    If no artifact exists after script or by default, fails with clear next action.
+    If --skip-review is set, produces partial outcome.
+    If no artifact exists, fails with clear next action.
     """
     steps = {}
     errors = []
     warnings = []
+
+    # ── Build policy for downstream calls ───────────┘
+    policy = {
+        "vision_required": "if_configured",  # deliver v2: warning, not failure
+        "review_skipped": skip_review,
+        "parser": "extended",
+    }
 
     # ── Step 1: Audit ────────────────────────────────────────────────────
     audit = cmd_audit(run_id)
@@ -1362,16 +1397,15 @@ def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None 
         errors.append("review_bundle_incomplete")
 
     # ── Step 3: Run external reviewer script (if provided) ───────────────
-    reviewer_ran = False
     if reviewer_script:
         script_result = _run_reviewer_script(reviewer_script, run_id, PROJECT_ROOT)
+        script_ok = script_result.get("ok", False)
         steps["reviewer_script"] = {
-            "status": "pass" if script_result.get("ok") else "fail",
+            "status": "pass" if script_ok else "fail",
             "detail": script_result.get("detail", ""),
         }
-        reviewer_ran = True
-        if not script_result.get("ok"):
-            warnings.append(f"reviewer script exited {script_result.get('returncode', '?')}")
+        if not script_ok:
+            errors.append("reviewer_script_failed")
 
     # ── Step 4: Find and parse review artifact ───────────────────────────
     review = _get_latest_review_artifact(run_id)
@@ -1388,24 +1422,29 @@ def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None 
     }
 
     if skip_review:
-        # Explicit skip with accepted reason
-        steps["review_artifact"]["status"] = "skipped"
-        if skip_review_reason:
-            steps["review_artifact"]["detail"] = skip_review_reason
-        warnings.append(f"review skipped: {skip_review_reason or 'no reason given'}")
-    elif not artifact_found:
-        errors.append("review_artifact_missing")
-    elif review_status in ("reject", "requires_fix"):
-        errors.append("review_rejected")
-    elif review_status == "skipped":
-        errors.append("review_rejected")
-    elif review_status == "partial" and profile == "demo":
-        if skip_review_reason:
-            warnings.append(f"review partial with accepted risk: {skip_review_reason}")
+        # Explicit skip — bail to partial outcome
+        if not skip_review_reason:
+            warnings.append("review skipped without explicit reason — accepted")
         else:
+            steps["review_artifact"]["detail"] = skip_review_reason
+            warnings.append(f"review skipped: {skip_review_reason}")
+        # Partial outcome: skip all remaining review steps
+        partial_outcome = True
+    else:
+        partial_outcome = False
+        if not artifact_found:
+            errors.append("review_artifact_missing")
+        elif review_status in ("reject", "requires_fix"):
             errors.append("review_rejected")
-    elif review_status is None:
-        errors.append("review_rejected")
+        elif review_status == "skipped":
+            errors.append("review_rejected")
+        elif review_status == "partial" and profile == "demo":
+            if skip_review_reason:
+                warnings.append(f"review partial with accepted risk: {skip_review_reason}")
+            else:
+                errors.append("review_rejected")
+        elif review_status is None:
+            errors.append("review_rejected")
 
     # ── Step 5: Review mode classification ───────────────────────────────
     steps["review_quality"] = {
@@ -1417,7 +1456,10 @@ def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None 
         "executor_model": review.get("executor_model") or "unknown",
     }
 
-    if review_mode == "same_session_self_review":
+    if partial_outcome:
+        # Skip quality check for explicit skip
+        steps["review_quality"]["status"] = "skipped"
+    elif review_mode == "same_session_self_review":
         errors.append("same_session_self_review")
         steps["review_quality"]["status"] = "fail"
     elif review_mode == "fresh_context_same_model":
@@ -1432,16 +1474,18 @@ def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None 
         steps["review_quality"]["status"] = "skipped"
 
     # ── Step 6: Fix-response timestamp check ─────────────────────────────
-    fix_ok, fix_reason = _check_fix_response_valid(run_id)
-    steps["fix_response_check"] = {"status": "pass" if fix_ok else "fail", "detail": fix_reason}
-    if not fix_ok:
-        errors.append("re_review_required")
+    if partial_outcome:
+        steps["fix_response_check"] = {"status": "skipped", "detail": "review was skipped"}
+    else:
+        fix_ok, fix_reason = _check_fix_response_valid(run_id)
+        steps["fix_response_check"] = {"status": "pass" if fix_ok else "fail", "detail": fix_reason}
+        if not fix_ok:
+            errors.append("re_review_required")
 
     # ── Step 7: Vision review check (profile-driven) ─────────────────────
     has_ss = _has_screenshots(run_id)
     vision_status = "skipped"
     if has_ss:
-        # Check for vision review artifact
         ev = _evidence_path(run_id)
         vision_paths = [
             os.path.join(ev, "vision-review.md"),
@@ -1453,28 +1497,35 @@ def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None 
             vision_status = "pass"
         else:
             vision_status = "unavailable"
-            warnings.append("vision_review_unavailable: screenshots exist but no vision review configured — allowed for demo_done")
+            if not partial_outcome:
+                warnings.append("vision_review_unavailable: screenshots exist but no vision review configured — allowed for demo_done")
     steps["vision_review"] = {"status": vision_status, "screenshots": has_ss}
 
-    # ── Step 8: Review Status ────────────────────────────────────────────
-    review_status_result = cmd_review_status(run_id)
-    review_ready = review_status_result.get("pass", False)
-    steps["review_status"] = {"status": "pass" if review_ready else "fail"}
-    if not review_ready and not any(e in errors for e in ["review_artifact_missing", "review_rejected"]):
-        errors.append("complete_review_failed")
+    # ── Step 8-9: Old locks (only if NOT partial_outcome) ────────────────
+    if not partial_outcome:
+        review_status_result = cmd_review_status(run_id)
+        review_ready = review_status_result.get("pass", False)
+        steps["review_status"] = {"status": "pass" if review_ready else "fail"}
+        if not review_ready and not any(e in errors for e in ["review_artifact_missing", "review_rejected"]):
+            errors.append("complete_review_failed")
 
-    # ── Step 9: Complete Review ──────────────────────────────────────────
-    complete = cmd_complete_review(run_id)
-    complete_ok = complete.get("pass", False)
-    steps["complete_review"] = {"status": "pass" if complete_ok else "fail",
-                                 "verdict": complete.get("verdict", "unknown")}
-    if not complete_ok and "complete_review_failed" not in errors:
-        errors.append("complete_review_failed")
+        complete = cmd_complete_review(run_id)
+        complete_ok = complete.get("pass", False)
+        steps["complete_review"] = {"status": "pass" if complete_ok else "fail",
+                                     "verdict": complete.get("verdict", "unknown")}
+        if not complete_ok and "complete_review_failed" not in errors:
+            errors.append("complete_review_failed")
+    else:
+        steps["review_status"] = {"status": "skipped", "detail": "review was explicitly skipped"}
+        steps["complete_review"] = {"status": "skipped", "detail": "review was explicitly skipped"}
 
     # ── Graded outcome ───────────────────────────────────────────────────
     ok = len(errors) == 0
 
-    if ok:
+    if partial_outcome:
+        final_verdict = "technical_partial"
+        recommendation = f"PARTIAL — review skipped: {skip_review_reason or 'no reason given'}"
+    elif ok:
         if review_mode == "cross_model":
             final_verdict = "demo_done"
             recommendation = "DONE — cross-model review passed"
@@ -1493,6 +1544,7 @@ def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None 
             "audit_failed": "BLOCKED: audit failed — fix gate issues, re-run deliver",
             "review_bundle_incomplete": "BLOCKED: review bundle incomplete — run prepare-review first",
             "review_artifact_missing": "REVIEW MISSING: run a reviewer, then re-run atm deliver",
+            "reviewer_script_failed": "BLOCKED: reviewer script failed — check script and re-run deliver",
             "review_rejected": "BLOCKED: review rejected — fix findings, write fix-response, re-run deliver",
             "re_review_required": "RE-REVIEW REQUIRED: fix-response exists but needs newer approve re-review",
             "same_session_self_review": "BLOCKED: same-session self-review detected — use fresh-context or different model",
@@ -1511,4 +1563,5 @@ def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None 
         "review": review,
         "recommendation": recommendation,
     }
+
 
