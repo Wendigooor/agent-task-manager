@@ -28,8 +28,6 @@ This is not a prompting problem. It's a **runtime** problem. ATM is the **object
 ### How It Fits In
 
 ```
-PUFF (control plane)
-  ↓ launches
 Agent (Hermes/Codex/OpenCode)
   ↓ orchestrates
 ATM (gate runner)   ← YOU ARE HERE
@@ -403,7 +401,7 @@ Planned but not implemented (current E2E scripts already use hard assertions):
 - Workflow designer
 - Markdown parser
 - Visual AI judge
-- Full PUFF replacement
+- Full control plane replacement
 - Enterprise project management
 
 ## How It Integrates With The Gold Standard
