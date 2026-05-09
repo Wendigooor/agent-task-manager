@@ -37,7 +37,7 @@ ATM (gate runner)   ← YOU ARE HERE
 Gold Standard (constitution — internal convention, 57KB, 405 steps)
 ```
 
-ATM enforces an internal autonomous delivery convention (the Gold Standard — 57KB, 405 mandatory steps). See [`GOLD_STANDARD.md`](GOLD_STANDARD.md) for the full map.
+ATM enforces an internal autonomous delivery convention (the Gold Standard — 57KB, 405 mandatory steps). See [`GOLD_STANDARD.md`](GOLD_STANDARD.md).
 
 ---
 
