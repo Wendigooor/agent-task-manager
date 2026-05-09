@@ -963,7 +963,7 @@ def cmd_review_status(run_id):
     }
 
 
-def cmd_complete_review(run_id):
+def cmd_complete_review(run_id, vision_required=True):
     """Complete review: validate all artifacts, re-audit, and return final status.
 
     If complete-review fails, final status CANNOT be done/pass.
@@ -1038,8 +1038,8 @@ def cmd_complete_review(run_id):
         if text_review:
             errors.append(f"could not parse reviewer verdict from {text_review}")
 
-    # Check screenshots + vision
-    if status["artifacts"].get("screenshot_count", 0) > 0 and not status["artifacts"].get("vision-review"):
+    # Check screenshots + vision (only if vision_required)
+    if vision_required and status["artifacts"].get("screenshot_count", 0) > 0 and not status["artifacts"].get("vision-review"):
         e = "screenshots exist but vision review not found"
         if e not in errors:
             errors.append(e)
