@@ -33,11 +33,14 @@ PUFF (control plane)
 Agent (Hermes/Codex/OpenCode)
   ↓ orchestrates
 ATM (gate runner)   ← YOU ARE HERE
-  ↓ enforces
-Gold Standard (constitution — internal convention, 57KB, 405 steps)
+  ↓ enforces via one command
+atm deliver --id <run> --profile demo
+  ↓ audit → prepare → review → complete → verdict
+demo_done
 ```
 
-ATM enforces an internal autonomous delivery convention (the Gold Standard — 57KB, 405 mandatory steps). See [`GOLD_STANDARD.md`](GOLD_STANDARD.md).
+ATM enforces an internal autonomous delivery convention.
+See [`GOLD_STANDARD.md`](GOLD_STANDARD.md).
 
 ---
 
@@ -53,16 +56,9 @@ Every gate transition, evidence attachment, and command run is stored in an appe
 # 1. Full demo (5 seconds)
 python3 src/demo_flow.py
 
-# 2. Real use
-atm init-run --id my-feature --profile demo --contract ORIGINAL_CONTRACT.md
-atm import-gates --profile demo
-atm next                    # → "build.production"
-atm run --gate build.production --command 'npm run build'
-atm pass --gate e2e.passed --evidence screenshots/01.png
-atm verify
-atm verdict
-atm prepare-review --id my-feature
-atm complete-review --id my-feature
+# 2. Real use — single command
+atm deliver --id my-feature --profile demo
+# Runs: audit → prepare-review → review → complete-review → demo_done
 ```
 
 ---
@@ -255,6 +251,33 @@ atm complete-review --id <run>
     Critical rule: fix-response is NOT approval. DONE requires latest reviewer
     verdict to be approve, not just a fix-response.
     Verdicts: review_passed, ready_for_re_review, review_rejected, review_incomplete.
+
+atm deliver --id <run> --profile demo
+    **Runtime-owned review lifecycle — the only valid path to demo_done.**
+    Runs all 9 steps automatically:
+      1. audit           → FAIL if not PASS
+      2. prepare-review   → FAIL if bundle incomplete
+      3. review artifact  → FAIL if no verdict file found
+      4. review quality   → FAIL on same_session_self_review; warn on same-model
+      5. fix-response      → FAIL if fix-response newer than latest approve
+      6. vision review    → warning if unavailable (if_configured)
+      7. review-status    → FAIL if infra checks fail
+      8. complete-review  → FAIL if anti-false-done lock doesn't pass
+      9. verdict          → demo_done only if all steps pass
+
+    Vendor-agnostic: accepts any reviewer that writes a markdown artifact
+    with YAML frontmatter and a Status: approve/reject line.
+    Supports --reviewer-script for external reviewers and
+    --skip-review for explicit partial outcomes.
+
+    Example:
+      atm deliver --id my-feature --profile demo
+      → DONE — cross-model review passed
+
+    Options:
+      --reviewer-script PATH   Run external reviewer script
+      --skip-review            Skip review (produces technical_partial)
+      --skip-review-reason TXT  Accepted risk reason
 ```
 
 ## Verdict Logic
