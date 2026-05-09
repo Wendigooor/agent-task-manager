@@ -243,11 +243,18 @@ def cmd_pass(run_id, gate_id, evidence_path=None, note=None):
     if kind in ("file_exists", "file_exists_or_note"):
         paths = spec.get("paths", [])
         for p in paths:
-            if not os.path.exists(p):
-                if kind == "file_exists":
-                    return {"error": f"Required file '{p}' not found"}
-        if kind == "file_exists" and paths and not evidence_path:
-            return {"error": "File evidence required for this gate"}
+            # Resolve spec paths relative to PROJECT_ROOT
+            resolved = os.path.join(PROJECT_ROOT, p) if not os.path.isabs(p) else p
+            if not os.path.exists(resolved):
+                # Fallback: check run's evidence directory
+                ev_fallback = os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence", p)
+                if not os.path.exists(ev_fallback):
+                    if kind == "file_exists":
+                        return {"error": f"Required file '{p}' not found (checked {resolved} and {ev_fallback})"}
+
+    # Resolve evidence path to absolute BEFORE storing
+    if evidence_path and not os.path.isabs(evidence_path):
+        evidence_path = os.path.abspath(evidence_path)
 
     if evidence_path and not os.path.exists(evidence_path):
         return {"error": f"Evidence file '{evidence_path}' not found"}
@@ -608,7 +615,10 @@ def cmd_audit(run_id=None, summary_path=None):
                 p_resolved = p.replace("<run-id>", run_id) if "<run-id>" in p else p
                 full_path = os.path.join(PROJECT_ROOT, p_resolved) if not os.path.isabs(p_resolved) else p_resolved
                 if not os.path.exists(full_path):
-                    issues.append({"type": "evidence_file_missing", "detail": f"gate {gid}: required file {full_path} not found", "severity": "critical", "gate": gid})
+                    # Fallback: check run's evidence directory
+                    ev_path = os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence", p_resolved)
+                    if not os.path.exists(ev_path):
+                        issues.append({"type": "evidence_file_missing", "detail": f"gate {gid}: required file {full_path} not found (also checked {ev_path})", "severity": "critical", "gate": gid})
 
     # 6. Evidence refs: attached files that don't exist
     ev_files = conn.execute("SELECT gate_id, path FROM evidence_refs WHERE run_id = ? AND evidence_type = 'file' AND path IS NOT NULL", [run_id]).fetchall()
