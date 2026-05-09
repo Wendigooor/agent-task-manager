@@ -1,80 +1,80 @@
 # Gold Standard — ATM Reference
 
-## Что это
+## What This Is
 
-Это карта связи между **Agent Task Manager (ATM)** и **Autonomous Delivery Gold Standard** (57KB, 405 mandatory steps, PvP Arena Season 1).
+A map of the relationship between **Agent Task Manager (ATM)** and the **Autonomous Delivery Gold Standard** (57KB, 405 mandatory steps, PvP Arena Season 1).
 
-Gold Standard — это "конституция" автономной доставки. ATM — это "суд", который её исполняет.
+The Gold Standard is the "constitution" of autonomous delivery. ATM is the "court" that enforces it.
 
 ```
-Gold Standard (конституция)
-    ↓ определяет
-ATM gates (законы)
-    ↓ исполняет
-gate_agent.py (судья)
-    ↓ производит
-Verdict (приговор)
+Gold Standard (constitution)
+    ↓ defines
+ATM gates (laws)
+    ↓ executes
+gate_agent.py (judge)
+    ↓ produces
+Verdict (sentence)
 ```
 
-## Источник
+## Source
 
-Оригинал: [AUTONOMOUS_DELIVERY_GOLD_STANDARD.md](https://github.com/Wendigooor/puff/blob/main/evidence/pvp-arena-season-1/AUTONOMOUS_DELIVERY_GOLD_STANDARD.md) в репозитории PUFF.
+Original: [AUTONOMOUS_DELIVERY_GOLD_STANDARD.md](https://github.com/Wendigooor/puff/blob/main/evidence/pvp-arena-season-1/AUTONOMOUS_DELIVERY_GOLD_STANDARD.md) in the PUFF repository.
 
-## Как ATM реализует Gold Standard
+## How ATM Implements the Gold Standard
 
-### ATM Execution Layer (раздел Gold Standard)
+### ATM Execution Layer (Gold Standard section)
 
-Gold Standard требует:
+Gold Standard requires:
 ```
 If atm is available, agent must use it.
 If atm is unavailable or unused, max verdict = partial.
 Manual demo_done is invalid.
 ```
 
-ATM покрывает это через:
+ATM covers this through:
 - `bin/atm` — CLI entry point
 - `gate_agent.py` — gate runner engine
 - `gateboard.py` — ORM + SQLite schema + CLI logic
-- `.atm/state.db` — SQLite база (auto-created)
-- `.atm/logs/<run-id>/` — логи команд
+- `.atm/state.db` — SQLite database (auto-created)
+- `.atm/logs/<run-id>/` — command run logs
 
 ### Gate Ledger Rule
 
-Gold Standard требует:
-- Gate ledger создаётся ДО реализации
-- Каждый gate имеет id, severity, status, owner, notes, evidence refs
-- Gates стартуют как `pending`
-- Gates обновляются во время работы, не в конце
-- Финальный verdict вычисляется из gate statuses
+Gold Standard requires:
+- Gate ledger is created BEFORE implementation
+- Each gate has id, severity, status, owner, notes, evidence refs
+- Gates start as `pending`
+- Gates are updated during the run, not only at the end
+- Final verdict is computed from gate statuses
 
-ATM покрывает через:
-- `atm init-run --id <run> --profile demo --contract <path>` — создаёт run
-- `atm import-gates --profile demo` — импортирует gates из встроенного профиля
-- `6 tables` в SQLite: runs, gates, gate_events (append-only), evidence_refs, command_runs, verdicts
-- Статусы: pending → in_progress → passed/failed/blocked
-- Запрещённые транзишены (например `pending → passed` для command gates)
+ATM covers through:
+- `atm init-run --id <run> --profile demo --contract <path>` — creates a run
+- `atm import-gates --profile demo` — imports gates from built-in profile
+- `6 tables` in SQLite: runs, gates, gate_events (append-only), evidence_refs, command_runs, verdicts
+- Statuses: pending → in_progress → passed/failed/blocked
+- Forbidden transitions (e.g. `pending → passed` for command gates)
 
 ### Operating Modes
 
-Gold Standard определяет 4 режима (Patch/Feature/Demo/Benchmark). ATM покрывает через 4 встроенных профиля:
+Gold Standard defines 4 modes (Patch/Feature/Demo/Benchmark). ATM covers them through 4 built-in profiles:
 
-| Профиль | Соответствует | Какие gates |
-|---------|---------------|-------------|
-| `patch` | Mode A: Patch | Базовые проверки (build/typecheck) |
-| `feature` | Mode B: Feature | Discovery + реализация + evidence |
-| `demo` | Mode C: Demo | Всё из feature + UI/E2E/визуал |
-| `benchmark` | Mode D: Benchmark | Всё из demo + timebox + rubric |
+| Profile | Matches | Gates |
+|---------|---------|-------|
+| `patch` | Mode A: Patch | Basic checks (build/typecheck) |
+| `feature` | Mode B: Feature | Discovery + implementation + evidence |
+| `demo` | Mode C: Demo | All of feature + UI/E2E/visuals |
+| `benchmark` | Mode D: Benchmark | All of demo + timebox + rubric |
 
 ### Verdict Logic
 
-Gold Standard требует:
+Gold Standard requires:
 ```
 if critical gate failed → verdict = failed/partial
 if major gate failed → verdict = partial
 if all passed → verdict = demo_done
 ```
 
-ATM реализует через `atm verdict`:
+ATM implements through `atm verdict`:
 ```python
 if critical gate failed:       verdict = failed
 elif critical gate pending:    verdict = technical_partial
@@ -86,53 +86,53 @@ else:                          verdict = technical_partial
 
 ### Anti-False-Done Lock
 
-Gold Standard содержит раздел Readiness Assertion And Honesty Gate. ATM реализует через review lifecycle:
+Gold Standard includes the Readiness Assertion And Honesty Gate section. ATM implements through the review lifecycle:
 - `atm prepare-review` — export + audit + bundle
 - `atm review-status` — check artifacts + parse verdict
 - `atm complete-review` — anti-false-done: fix-response ≠ approval
 
-Критическое правило из Gold Standard:
+Critical rule from Gold Standard:
 ```
 If ATM verdict and prose summary disagree, the stricter status wins.
 Manual demo_done is invalid.
 ```
 
-ATM enforce через:
-- `atm verify` — проверяет противоречия
-- `atm verdict` — вычисляет статус из gate state, не из prose
-- `atm complete-review` — блокирует `demo_done` если review не пройден
+ATM enforces through:
+- `atm verify` — checks for contradictions
+- `atm verdict` — computes status from gate state, not from prose
+- `atm complete-review` — blocks `demo_done` if review hasn't passed
 
 ### Anti-Pattern Checklist (Gold Standard)
 
-Из 18 анти-паттернов, ATM напрямую предотвращает:
+Out of 18 anti-patterns, ATM directly prevents:
 
-| Анти-паттерн | Как ATM предотвращает |
-|--------------|----------------------|
-| Gate archive theater | `init-run` требует id, `import-gates` создаёт gates до кода |
-| ATM bypass | `atm verify` проверяет что gates существуют |
-| Verdict forgery | `atm verdict` вычисляется из gate state |
-| Thin evidence | `pass` требует evidence path или note |
-| Premature done | `complete-review` не пропустит без approve |
+| Anti-pattern | How ATM prevents it |
+|--------------|---------------------|
+| Gate archive theater | `init-run` requires id, `import-gates` creates gates before code |
+| ATM bypass | `atm verify` checks that gates exist |
+| Verdict forgery | `atm verdict` computed from gate state |
+| Thin evidence | `pass` requires evidence path or note |
+| Premature done | `complete-review` won't pass without approve |
 
-## Как использовать
+## How To Use
 
 ```bash
-# 1. Прочитать Gold Standard
+# 1. Read the Gold Standard
 open https://github.com/Wendigooor/puff/blob/main/evidence/pvp-arena-season-1/AUTONOMOUS_DELIVERY_GOLD_STANDARD.md
 
-# 2. Создать run через ATM
+# 2. Create a run via ATM
 atm init-run --id my-feature --profile demo --contract ORIGINAL_CONTRACT.md
 
-# 3. Импортировать gates
+# 3. Import gates
 atm import-gates --profile demo
 
-# 4. Работать через gates
-atm next           # → следующий gate
-atm start --gate X # → начать
-atm run --gate X --command 'npm run build'  # → выполнить
-atm pass --gate X --evidence screenshots/01.png  # → подтвердить
+# 4. Work through gates
+atm next           # → next gate
+atm start --gate X # → start it
+atm run --gate X --command 'npm run build'  # → execute
+atm pass --gate X --evidence screenshots/01.png  # → confirm
 
-# 5. Финализировать
+# 5. Finalize
 atm verify
 atm verdict
 atm export --out evidence/my-feature/
@@ -140,16 +140,16 @@ atm prepare-review --id my-feature
 atm complete-review --id my-feature  # → anti-false-done
 ```
 
-## Chain of custody
+## Chain of Custody
 
 ```
-PUFF (контрольная панель)
-  ↓ вызывает
-Hermes/Codex/OpenCode (агент)
-  ↓ использует
+PUFF (control plane)
+  ↓ invokes
+Hermes/Codex/OpenCode (agent)
+  ↓ uses
 ATM (gate runner)
-  ↓ исполняет
-Gold Standard (конституция)
+  ↓ enforces
+Gold Standard (constitution)
 ```
 
-ATM — это единственный слой где "закон" встречается с "исполнением". Без ATM Gold Standard — просто текст. Без Gold Standard ATM — просто CLI с SQLite.
+ATM is the only layer where "law" meets "enforcement". Without ATM, the Gold Standard is just text. Without the Gold Standard, ATM is just a CLI with SQLite.
