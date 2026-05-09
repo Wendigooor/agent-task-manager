@@ -18,7 +18,9 @@ Verdict (приговор)
 
 ## Источник
 
-Оригинал: [AUTONOMOUS_DELIVERY_GOLD_STANDARD.md](https://github.com/Wendigooor/puff/blob/main/evidence/pvp-arena-season-1/AUTONOMOUS_DELIVERY_GOLD_STANDARD.md) в репозитории PUFF.
+Gold Standard живёт в репозитории **PUFF** ([github.com/Wendigooor/puff](https://github.com/Wendigooor/puff)) — коллекции экспериментов по автономной доставке фич, где ATM был обкатан. PUFF — это не зависимость и не рантайм; это вышестоящий исследовательский проект, который породил стандарт, исполняемый ATM.
+
+Оригинал: [AUTONOMOUS_DELIVERY_GOLD_STANDARD.md](https://github.com/Wendigooor/puff/blob/main/evidence/pvp-arena-season-1/AUTONOMOUS_DELIVERY_GOLD_STANDARD.md)
 
 ## Как ATM реализует Gold Standard
 

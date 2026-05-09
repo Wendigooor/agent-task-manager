@@ -18,7 +18,9 @@ Verdict (sentence)
 
 ## Source
 
-Original: [AUTONOMOUS_DELIVERY_GOLD_STANDARD.md](https://github.com/Wendigooor/puff/blob/main/evidence/pvp-arena-season-1/AUTONOMOUS_DELIVERY_GOLD_STANDARD.md) in the PUFF repository.
+The Gold Standard lives in the **PUFF** repository ([github.com/Wendigooor/puff](https://github.com/Wendigooor/puff)) — a collection of autonomous feature delivery experiments where ATM was battle-tested. PUFF is not a dependency or required runtime; it's the upstream research project that produced the standard ATM enforces.
+
+Original: [AUTONOMOUS_DELIVERY_GOLD_STANDARD.md](https://github.com/Wendigooor/puff/blob/main/evidence/pvp-arena-season-1/AUTONOMOUS_DELIVERY_GOLD_STANDARD.md)
 
 ## How ATM Implements the Gold Standard
 
