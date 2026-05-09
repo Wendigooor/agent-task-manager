@@ -1251,6 +1251,7 @@ def _get_latest_review_artifact(run_id: str) -> dict:
 
     Searches evidence/ and review-bundle/ for any markdown file matching
     patterns: *verdict*.md, *review*.md, *result*.md
+    Excludes REVIEW_BUNDLE_MANIFEST.md (it's a manifest, not a verdict).
     """
     ev = _evidence_path(run_id)
     bundle = _review_bundle_path(run_id)
@@ -1261,6 +1262,8 @@ def _get_latest_review_artifact(run_id: str) -> dict:
             continue
         try:
             for f in os.listdir(search_dir):
+                if f == "REVIEW_BUNDLE_MANIFEST.md":
+                    continue
                 if f.endswith(".md") and any(kw in f.lower() for kw in
                     ["verdict", "review", "result"]):
                     full = os.path.join(search_dir, f)
