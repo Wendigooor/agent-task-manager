@@ -483,6 +483,32 @@ def cmd_doctor():
     }
 
 
+def cmd_init_project():
+    """Initialize ATM project directory."""
+    config_path = os.path.join(PROJECT_ROOT, ".atm", "config.yaml")
+    if os.path.exists(config_path):
+        return {"status": "exists", "path": config_path, "detail": "ATM already initialized"}
+    os.makedirs(os.path.join(PROJECT_ROOT, ".atm"), exist_ok=True)
+    with open(config_path, "w") as f:
+        f.write(f"""# ATM project config
+project: {os.path.basename(PROJECT_ROOT)}
+default_profile: technical-demo
+paths:
+  contract: contract.md
+  evidence: agent/atm/runs/<run-id>/evidence
+""")
+    # Create .gitignore for ATM artifacts
+    gitignore = os.path.join(PROJECT_ROOT, ".gitignore")
+    existing = ""
+    if os.path.exists(gitignore):
+        with open(gitignore) as f:
+            existing = f.read()
+    if "agent/atm/runs/" not in existing:
+        with open(gitignore, "a") as f:
+            f.write("\n# ATM run evidence\nagent/atm/runs/\n")
+    return {"status": "created", "path": config_path, "detail": f"ATM project initialized in {PROJECT_ROOT}"}
+
+
 def cmd_smoke(run_id, args=None):
     """Quick smoke test: doctor → init → import → run → verify → verdict."""
     import tempfile, os, json

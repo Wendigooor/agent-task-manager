@@ -86,6 +86,10 @@ def main():
     sp.add_argument("--skip-review", action="store_true", help="Skip review (requires --skip-review-reason)")
     sp.add_argument("--skip-review-reason", help="Accepted risk reason for skipping review")
 
+    # init-project
+    sp = sub.add_parser("init-project", help="Initialize ATM project in current directory")
+    _add_json(sp)
+
     # doctor (no --id)
     sp = sub.add_parser("doctor", help="Check ATM environment"); _add_json(sp)
 
@@ -113,6 +117,7 @@ def main():
             "review-status": lambda: cmd_review_status(rid),
             "complete-review": lambda: cmd_complete_review(rid),
             "deliver": lambda: cmd_deliver(rid, args.profile, getattr(args, 'reviewer_script', None), getattr(args, 'skip_review', False), getattr(args, 'skip_review_reason', None)),
+            "init-project": lambda: cmd_init_project(),
             "doctor": cmd_doctor,
             "smoke": lambda: cmd_smoke(rid, args),
         }
