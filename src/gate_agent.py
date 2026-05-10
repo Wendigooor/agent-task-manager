@@ -85,13 +85,23 @@ def main():
     sp.add_argument("--reviewer-script", help="Path to external reviewer script to run")
     sp.add_argument("--skip-review", action="store_true", help="Skip review (requires --skip-review-reason)")
     sp.add_argument("--skip-review-reason", help="Accepted risk reason for skipping review")
+    sp.add_argument("--mode", default="careful", choices=["careful", "berserk"], help="Delivery mode: careful (stop on partial) or berserk (never stop unless done)")
 
     # init-project
     sp = sub.add_parser("init-project", help="Initialize ATM project in current directory")
     _add_json(sp)
 
-    # doctor (no --id)
-    sp = sub.add_parser("doctor", help="Check ATM environment"); _add_json(sp)
+    # watch
+    sp = sub.add_parser("watch", help="Watchdog mode — run deliver in a loop")
+    _add_json(sp); _add_id(sp)
+    sp.add_argument("--profile", default="demo")
+    sp.add_argument("--every", type=int, default=300, help="Seconds between checks")
+    sp.add_argument("--mode", default="berserk", choices=["careful", "berserk"])
+
+    # doctor (with run ID)
+    sp = sub.add_parser("doctor", help="Diagnose deliver blockers (read-only)")
+    _add_json(sp); _add_id(sp)
+    sp.add_argument("--profile", default="demo")
 
     args = p.parse_args()
     rid = _resolve_run_id(args)
@@ -116,9 +126,10 @@ def main():
             "prepare-review": lambda: cmd_prepare_review(rid),
             "review-status": lambda: cmd_review_status(rid),
             "complete-review": lambda: cmd_complete_review(rid),
-            "deliver": lambda: cmd_deliver(rid, args.profile, getattr(args, 'reviewer_script', None), getattr(args, 'skip_review', False), getattr(args, 'skip_review_reason', None)),
+            "deliver": lambda: cmd_deliver(rid, args.profile, getattr(args, 'reviewer_script', None), getattr(args, 'skip_review', False), getattr(args, 'skip_review_reason', None), getattr(args, 'mode', 'careful')),
             "init-project": lambda: cmd_init_project(),
-            "doctor": cmd_doctor,
+            "doctor": lambda: cmd_doctor(rid, getattr(args, 'profile', 'demo')),
+            "watch": lambda: _cmd_watch(args, rid, getattr(args, 'profile', 'demo')),
             "smoke": lambda: cmd_smoke(rid, args),
         }
         result = handlers.get(args.command, lambda: {"error": f"Unknown: {args.command}"})()
@@ -139,6 +150,19 @@ def _cmd_run(rid, args):
     if not cmd:
         return {"error": "No command. Usage: atm run --gate <id> -- <shell cmd>"}
     return cmd_run(rid, args.gate, cmd, args.timeout)
+
+
+def _cmd_watch(args, rid, profile):
+    """Handle watch command."""
+    every = getattr(args, 'every', 300)
+    mode = getattr(args, 'mode', 'berserk')
+    json_mode = getattr(args, "json", False) or "ATM_JSON" in os.environ
+    if json_mode:
+        result = cmd_watch(rid, profile, every, mode, max_cycles=0)
+        print(json.dumps(result, indent=2, default=str))
+        return result
+    exit_code = cmd_watch_cli(rid, profile, every, mode)
+    sys.exit(exit_code)
 
 def _human(cmd, r):
     if cmd == "smoke":
@@ -223,7 +247,12 @@ def _human(cmd, r):
         print(f"\\n  Recommendation: {r.get('recommendation', 'unknown')}")
         print(f"  {'✅ DONE' if r.get('pass') else '❌ BLOCKED'}")
     elif cmd == "deliver":
-        print(f"DELIVER: {r.get('run_id')} | profile: {r.get('profile')}")
+        print(f"DELIVER: {r.get('run_id')} | profile: {r.get('profile')} | mode: {r.get('mode', 'careful')}")
+        print(f"  Status: {r.get('status', 'unknown')}")
+        if r.get("mode") == "berserk":
+            print(f"  Blocker: {r.get('blocker')}")
+            print(f"  Next action: {r.get('next_action')}")
+            print(f"  Retry: {r.get('retry_allowed')} | Hard blocked: {r.get('hard_blocked')}")
         print(f"  Status: {r.get('status', 'unknown')}")
         for step_name, step_data in r.get("steps", {}).items():
             st = step_data.get("status", "?")

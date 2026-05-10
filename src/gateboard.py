@@ -1436,6 +1436,166 @@ def cmd_complete_review(run_id, vision_required=True):
 
 # ── Deliver — Runtime-Owned Review Lifecycle ────────────────────────────────
 
+BERSERK_NEXT_ACTIONS = {
+    "audit_failed": "run_audit",
+    "review_bundle_incomplete": "run_prepare_review",
+    "review_artifact_missing": "run_text_review",
+    "review_rejected": "fix_review_reject",
+    "re_review_required": "rerun_review_after_fix",
+    "review_provenance_missing": "fix_review_provenance",
+    "same_session_self_review": "run_text_review",
+    "complete_review_failed": "run_complete_review",
+    "build_noop": "run_build",
+    "typecheck_pending": "run_typecheck",
+    "screenshots_missing": "add_screenshots",
+    "visual_review_missing": "add_visual_review",
+    "vision_review_missing": "run_vision_review",
+    "evidence_missing": "fix_gate_evidence",
+    "evidence_in_root": "move_evidence_to_run_dir",
+    "profile_mismatch": "use_correct_profile",
+    "reviewer_script_failed": "run_text_review",
+    "review_missing": "run_text_review",
+    "deliver_not_run": "run_audit",
+}
+
+BERSERK_BLOCKER_DIAG = {
+    "audit_failed": "ATM audit did not pass — critical or major issues block delivery",
+    "review_bundle_incomplete": "Review bundle is missing required files — run prepare-review to rebuild",
+    "review_artifact_missing": "No review artifact found — no reviewer-verdict.md or codex-reviewer-verdict.md in evidence/",
+    "review_rejected": "Latest reviewer verdict is reject or requires_fix — fix findings, write fix-response, rerun review",
+    "re_review_required": "Fix-response exists but no newer approve verdict — re-run reviewer for re-approval",
+    "review_provenance_missing": "Review artifact missing frontmatter metadata (reviewer_model, executor_model, review_mode)",
+    "same_session_self_review": "Review was written by executor as self-report in same session",
+    "complete_review_failed": "Complete-review anti-false-done lock did not pass — check errors",
+    "build_noop": "Build gate ran no-op command (echo/true/printf)",
+    "typecheck_pending": "Typecheck gate not passed",
+    "screenshots_missing": "Screenshot gates require real .png/.jpg files in evidence/screenshots/",
+    "visual_review_missing": "Visual review gate requires visual-review.md or vision-review.md artifact",
+    "vision_review_missing": "Screenshots exist but no vision review file found",
+    "evidence_missing": "Evidence package gate requires required files (summary.md, verdict.json, etc.)",
+    "evidence_in_root": "Evidence files detected in project root",
+    "profile_mismatch": "Demo profile used without screenshots",
+    "reviewer_script_failed": "Reviewer script exited non-zero or was not found",
+    "review_missing": "No reviewer configured and no review artifact exists",
+    "deliver_not_run": "Deliver was not executed yet",
+}
+
+
+def _berserk_analysis(audit, deliver_result: dict, run_id: str, profile: str) -> dict:
+    errors = deliver_result.get("errors", [])
+    status = deliver_result.get("status", "unknown")
+    audit = audit or {}
+    if deliver_result.get("ok"):
+        return {"blocker": None, "next_action": "done", "retry_allowed": False, "hard_blocked": False}
+    primary_error = None
+    for e in errors:
+        if e in BERSERK_BLOCKER_DIAG:
+            primary_error = e
+            break
+    if not primary_error:
+        primary_error = errors[0] if errors else "unknown"
+    next_action = BERSERK_NEXT_ACTIONS.get(primary_error, "ask_human")
+    retry_allowed = next_action not in ("ask_human",)
+    hard_blocked = next_action == "ask_human"
+    if hard_blocked and primary_error == "unknown":
+        for i in audit.get("issues", []):
+            if i.get("severity") == "critical":
+                ctype = i.get("type", "")
+                for kw, blocker in [("noop", "build_noop"), ("typecheck", "typecheck_pending"),
+                                     ("screenshot", "screenshots_missing"), ("visual", "visual_review_missing"),
+                                     ("evidence", "evidence_missing"), ("root", "evidence_in_root"),
+                                     ("profile", "profile_mismatch")]:
+                    if kw in ctype:
+                        primary_error = blocker
+                        next_action = BERSERK_NEXT_ACTIONS.get(blocker, "ask_human")
+                        retry_allowed = next_action not in ("ask_human",)
+                        hard_blocked = next_action == "ask_human"
+                        break
+                if primary_error != "unknown":
+                    break
+    if profile == "demo" and "review_artifact_missing" in errors and not hard_blocked:
+        ev = _evidence_path(run_id)
+        review_files = [f for f in (os.listdir(ev) if os.path.exists(ev) else [])
+                       if f.endswith(".md") and ("verdict" in f or "review" in f)]
+        if not review_files:
+            hard_blocked = True
+            retry_allowed = False
+            primary_error = "review_missing"
+            next_action = "ask_human"
+    return {"blocker": primary_error, "detail": BERSERK_BLOCKER_DIAG.get(primary_error, status),
+            "next_action": next_action, "retry_allowed": retry_allowed, "hard_blocked": hard_blocked}
+
+
+def _read_berserk_history(run_id: str) -> list:
+    ev = _evidence_path(run_id)
+    p = os.path.join(ev, "berserk-history.json")
+    if not os.path.exists(p):
+        return []
+    try:
+        with open(p) as f:
+            return json.loads(f.read())
+    except Exception:
+        return []
+
+
+def _write_berserk_history(run_id: str, entry: dict):
+    ev = _evidence_path(run_id)
+    os.makedirs(ev, exist_ok=True)
+    p = os.path.join(ev, "berserk-history.json")
+    h = _read_berserk_history(run_id)
+    h.append(entry)
+    with open(p, "w") as f:
+        json.dump(h[-50:], f, indent=2)
+
+
+def _check_stalled_loop(run_id: str) -> dict:
+    h = _read_berserk_history(run_id)
+    if len(h) < 3:
+        return {"stalled": False, "hard_blocked": False}
+    last5 = h[-5:]
+    blockers = [e.get("blocker") for e in last5]
+    if len(blockers) < 3 or len(set(b for b in blockers if b)) != 1 or blockers[0] is None:
+        return {"stalled": False, "hard_blocked": False}
+    first = last5[0]
+    latest = last5[-1]
+    has_progress = any(latest.get(k, 0) != first.get(k, 0) for k in ("evidence_count", "screenshot_count"))
+    has_progress = has_progress or latest.get("review_mtime", "") != first.get("review_mtime", "")
+    if has_progress:
+        return {"stalled": False, "hard_blocked": False, "progress_detected": True}
+    same = sum(1 for b in blockers if b == blockers[0])
+    if same >= 5:
+        return {"stalled": True, "hard_blocked": True, "blocker": "stalled_same_blocker",
+                "detail": f"Same blocker '{blockers[0]}' {same}x with no progress",
+                "next_action": "ask_human",
+                "recommendation": f"Hard blocked: stalled on '{blockers[0]}' after {same} attempts, no progress."}
+    if same >= 3:
+        return {"stalled": True, "hard_blocked": False, "blocker": blockers[0],
+                "detail": f"Same blocker '{blockers[0]}' {same}x with no progress",
+                "next_action": "run_doctor_and_change_strategy",
+                "recommendation": f"Change strategy: blocked on '{blockers[0]}' for {same} attempts."}
+    return {"stalled": False, "hard_blocked": False}
+
+
+def _berserk_snapshot(run_id: str) -> dict:
+    ev = _evidence_path(run_id)
+    ss_dir = os.path.join(ev, "screenshots")
+    ec = len([f for f in (os.listdir(ev) if os.path.exists(ev) else []) if os.path.isfile(os.path.join(ev, f))]) if os.path.exists(ev) else 0
+    sc = len([f for f in (os.listdir(ss_dir) if os.path.exists(ss_dir) else []) if f.endswith((".png", ".jpg"))]) if os.path.exists(ss_dir) else 0
+    rm = ""
+    if os.path.exists(ev):
+        mds = [os.path.join(ev, f) for f in os.listdir(ev) if f.endswith(".md") and ("verdict" in f or "review" in f)]
+        if mds:
+            rm = str(max(os.path.getmtime(m) for m in mds))
+    gs = ""
+    try:
+        conn = _ensure_db()
+        rows = conn.execute("SELECT id, status FROM gates WHERE run_id = ? ORDER BY id", [run_id]).fetchall()
+        gs = ",".join(f"{r[0]}:{r[1]}" for r in rows)
+        conn.close()
+    except Exception:
+        pass
+    return {"evidence_count": ec, "screenshot_count": sc, "review_mtime": rm, "gate_status": gs[:200]}
+
 DELIVER_FAIL_REASONS = {
     "audit_failed": "ATM audit did not pass",
     "review_bundle_incomplete": "Review bundle is incomplete or missing",
@@ -1770,17 +1930,15 @@ def _check_fix_response_valid(run_id: str) -> tuple[bool, str]:
 
 
 def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None = None,
-                skip_review: bool = False, skip_review_reason: str | None = None):
+                skip_review: bool = False, skip_review_reason: str | None = None,
+                mode: str = "careful"):
     """Full runtime-owned review lifecycle.
 
-    Vendor-agnostic — does not hardcode Codex, OpenAI, or any model.
-    Accepts any reviewer that writes a markdown file with:
-      - YAML frontmatter (review_mode, reviewer_model, etc.)
-      - Status: approve/reject/requires_fix line
-
-    If --reviewer-script is provided, runs it.
-    If --skip-review is set, produces partial outcome.
-    If no artifact exists, fails with clear next action.
+    mode='careful': current behavior. Partial outcomes allowed.
+    mode='berserk': never stop until ok=true or hard_blocked=true.
+                    Enhanced output with blocker, next_action, retry_allowed, hard_blocked.
+                    No premature DONE in recommendation.
+                    Tracks history for stalled loop detection.
     """
     steps = {}
     errors = []
@@ -2012,7 +2170,13 @@ def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None 
         }
         recommendation = rec_map.get(final_verdict, f"BLOCKED: {'; '.join(errors)}")
 
-    return {
+    # Berserk mode: no premature DONE in recommendation
+    if mode == "berserk" and not ok:
+        rec_lower = (recommendation or "").lower()
+        if any(w in rec_lower for w in ["done", "completed", "ready", "delivered"]):
+            recommendation = f"BLOCKED: {final_verdict} — {'; '.join(errors)}"
+
+    result = {
         "ok": ok,
         "run_id": run_id,
         "profile": profile,
@@ -2023,5 +2187,319 @@ def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None 
         "review": review,
         "recommendation": recommendation,
     }
+
+    # Berserk mode: add enhanced output
+    if mode == "berserk":
+        result["mode"] = "berserk"
+        berserk = _berserk_analysis(audit, result, run_id, profile)
+        result["blocker"] = berserk.get("blocker")
+        result["next_action"] = berserk.get("next_action")
+        result["retry_allowed"] = berserk.get("retry_allowed")
+        result["hard_blocked"] = berserk.get("hard_blocked")
+        result["blocker_detail"] = berserk.get("detail")
+
+        # Check stalled loop
+        stalled = _check_stalled_loop(run_id)
+        if stalled.get("stalled"):
+            result["stalled"] = True
+            result["hard_blocked"] = stalled.get("hard_blocked", result["hard_blocked"])
+            result["blocker"] = stalled.get("blocker", result["blocker"])
+            result["next_action"] = stalled.get("next_action", result["next_action"])
+            if stalled.get("recommendation"):
+                result["recommendation"] = stalled["recommendation"]
+
+        # Write history
+        snap = _berserk_snapshot(run_id)
+        snap["timestamp"] = now()
+        snap["blocker"] = result.get("blocker")
+        snap["next_action"] = result.get("next_action")
+        snap["status"] = result.get("status")
+        _write_berserk_history(run_id, snap)
+
+    return result
+
+
+# ── Doctor — Diagnostic Command (read-only) ──────────────────────────────────
+
+NEXT_ACTION_EXPLANATIONS = {
+    "run_audit": "Run atm audit to identify failing gates",
+    "run_prepare_review": "Export + audit + bundle. Run: atm prepare-review --id <run-id>",
+    "fix_gate_evidence": "Attach required evidence files to gates via atm pass --file",
+    "run_build": "Run the build command through atm run. Use a wrapper script, not echo/true.",
+    "run_typecheck": "Run typecheck through atm run with a real tsc wrapper script",
+    "run_e2e": "Execute the E2E test script through atm run",
+    "add_screenshots": "Capture desktop + mobile screenshots in evidence/screenshots/",
+    "add_visual_review": "Write visual-review.md with screenshot analysis in evidence/",
+    "run_text_review": "Run a text reviewer (Codex, DeepSeek Pro, etc.) that writes a verdict artifact with frontmatter",
+    "run_vision_review": "Run a vision reviewer on screenshots",
+    "fix_review_reject": "Address reviewer findings, write fix-response, then re-run reviewer",
+    "rerun_review_after_fix": "Fix-response exists. Re-run reviewer to get a new approve verdict.",
+    "fix_review_provenance": "Add reviewer_model, executor_model, review_mode to the review artifact frontmatter",
+    "move_evidence_to_run_dir": "Move evidence files from project root to agent/atm/runs/<run-id>/evidence/",
+    "use_correct_profile": "Pick the right profile: demo for visual, technical-report for CLI",
+    "run_complete_review": "Run complete-review to finalize the review lifecycle",
+    "ask_human": "Cannot continue automatically. Ask the user for input.",
+    "run_doctor_and_change_strategy": "Same blocker repeated. Run atm doctor for diagnosis, then try different approach.",
+}
+
+
+def cmd_doctor(run_id: str = None, profile: str = "demo") -> dict:
+    """Diagnose why deliver is blocked. Read-only, no state changes."""
+    if not run_id:
+        s = cmd_status()
+        if isinstance(s, dict):
+            run_id = s.get("run_id")
+    if not run_id:
+        return {"error": "No run ID provided or active"}
+
+    # Read-only snapshot
+    conn = _ensure_db()
+    run_row = conn.execute("SELECT id, profile, status, verdict FROM runs WHERE id = ?", [run_id]).fetchone()
+    if not run_row:
+        conn.close()
+        return {"error": f"Run '{run_id}' not found"}
+
+    gate_rows = conn.execute(
+        "SELECT id, kind, status, spec_json FROM gates WHERE run_id = ? ORDER BY id",
+        [run_id]
+    ).fetchall()
+    conn.close()
+
+    # Collect gate statuses
+    gates = {"passed": 0, "failed": 0, "in_progress": 0, "pending": 0, "blocked": 0}
+    gates_detail = []
+    for g in gate_rows:
+        gid, kind, st, spec = g[0], g[1], g[2], g[3]
+        gates[st] = gates.get(st, 0) + 1
+        gates_detail.append({"id": gid, "kind": kind, "status": st})
+
+    # Run audit (read-only)
+    audit = cmd_audit(run_id)
+
+    # Check evidence
+    ev = _evidence_path(run_id)
+    screenshots_dir = os.path.join(ev, "screenshots") if ev else ""
+    evidence_files = []
+    if ev and os.path.exists(ev):
+        evidence_files = [f for f in os.listdir(ev) if os.path.isfile(os.path.join(ev, f))]
+    screenshot_files = []
+    if screenshots_dir and os.path.exists(screenshots_dir):
+        screenshot_files = [f for f in os.listdir(screenshots_dir) if f.endswith((".png", ".jpg"))]
+
+    # Find review artifacts
+    review_artifacts = []
+    if ev and os.path.exists(ev):
+        review_artifacts = [f for f in os.listdir(ev)
+                           if f.endswith(".md") and ("verdict" in f or "review" in f)]
+
+    # Try a deliver to see what happens
+    deliver = cmd_deliver(run_id, profile, mode="berserk")
+
+    # Determine next_action
+    next_action = None
+    blocker = None
+
+    # From audit issues
+    if not audit.get("pass"):
+        for i in audit.get("issues", []):
+            if i.get("severity") == "critical":
+                ctype = i.get("type", "")
+                if "noop" in ctype:
+                    blocker = "build_noop"
+                elif "typecheck" in ctype:
+                    blocker = "typecheck_pending"
+                elif "screenshot" in ctype:
+                    blocker = "screenshots_missing"
+                elif "visual" in ctype:
+                    blocker = "visual_review_missing"
+                elif "evidence" in ctype:
+                    blocker = "evidence_missing"
+                elif "profile" in ctype:
+                    blocker = "profile_mismatch"
+
+    # From deliver errors
+    if not blocker and deliver.get("errors"):
+        for e in deliver["errors"]:
+            if e in BERSERK_BLOCKER_DIAG:
+                blocker = e
+                break
+
+    if blocker:
+        next_action = BERSERK_NEXT_ACTIONS.get(blocker, "ask_human")
+
+    # Check berserk history for stalled loop
+    stalled = _check_stalled_loop(run_id)
+
+    return {
+        "run_id": run_id,
+        "profile": profile,
+        "status": run_row[3] if run_row[3] else "active",
+        "gates": {
+            "total": len(gate_rows),
+            "passed": gates.get("passed", 0),
+            "failed": gates.get("failed", 0),
+            "in_progress": gates.get("in_progress", 0),
+            "pending": gates.get("pending", 0),
+            "blocked": gates.get("blocked", 0),
+        },
+        "gates_detail": gates_detail,
+        "audit": {
+            "pass": audit.get("pass", False),
+            "critical_issues": audit.get("critical_issues", 0),
+            "major_issues": audit.get("major_issues", 0),
+            "issues": audit.get("issues", []),
+        },
+        "evidence": {
+            "path": ev,
+            "files": evidence_files,
+            "count": len(evidence_files),
+            "screenshots": screenshot_files,
+            "screenshot_count": len(screenshot_files),
+        },
+        "review_artifacts": review_artifacts,
+        "deliver_preview": {
+            "ok": deliver.get("ok", False),
+            "status": deliver.get("status", "unknown"),
+            "errors": deliver.get("errors", []),
+            "blocker": deliver.get("blocker"),
+            "next_action": deliver.get("next_action"),
+            "blocker_detail": BERSERK_BLOCKER_DIAG.get(blocker or "", ""),
+        },
+        "blocker": blocker,
+        "next_action": next_action,
+        "next_action_detail": NEXT_ACTION_EXPLANATIONS.get(next_action or "", ""),
+        "stalled": stalled.get("stalled", False),
+        "hard_blocked": stalled.get("hard_blocked", False) or deliver.get("hard_blocked", False),
+        "recommendation": stalled.get("recommendation", deliver.get("recommendation", "")),
+    }
+
+
+# ── Watch — Cron-like Delivery Loop ──────────────────────────────────────────
+
+def cmd_watch(run_id: str, profile: str = "demo", every_seconds: int = 300,
+              mode: str = "berserk", max_cycles: int = 0) -> dict:
+    """Run deliver in a loop with stalled loop protection.
+
+    Returns dict with final result when loop exits.
+    Cycle limit: 0 means unlimited.
+    """
+    import time
+
+    cycles = 0
+    start = now()
+
+    while True:
+        cycles += 1
+        cycle_start = time.time()
+
+        result = cmd_deliver(run_id, profile, mode=mode)
+
+        ok = result.get("ok", False)
+        hard_blocked = result.get("hard_blocked", False)
+
+        # Check stalled loop
+        stalled = _check_stalled_loop(run_id)
+        if stalled.get("hard_blocked"):
+            hard_blocked = True
+
+        # Exit conditions
+        if ok:
+            return {
+                "ok": True,
+                "status": "done",
+                "mode": mode,
+                "cycles": cycles,
+                "run_id": run_id,
+                "deliver_result": result,
+                "elapsed_seconds": time.time() - time.mktime(datetime.fromisoformat(start.replace("Z", "+00:00")).timetuple()) if "Z" in start else 0,
+            }
+
+        if hard_blocked:
+            return {
+                "ok": False,
+                "status": "hard_blocked",
+                "mode": mode,
+                "cycles": cycles,
+                "run_id": run_id,
+                "deliver_result": result,
+                "stalled": stalled.get("stalled", False),
+            }
+
+        if max_cycles > 0 and cycles >= max_cycles:
+            return {
+                "ok": False,
+                "status": "max_cycles",
+                "mode": mode,
+                "cycles": cycles,
+                "run_id": run_id,
+                "deliver_result": result,
+            }
+
+        # Wait for next cycle
+        elapsed = time.time() - cycle_start
+        sleep_time = max(1, every_seconds - int(elapsed))
+        time.sleep(sleep_time)
+
+
+def cmd_watch_cli(run_id: str, profile: str = "demo", every_seconds: int = 300,
+                  mode: str = "berserk") -> int:
+    """CLI entry point for watch. Prints status updates, returns exit code."""
+    import time
+
+    cycles = 0
+    print(f"WATCH: {run_id}")
+    print(f"status: checking")
+    print(f"profile: {profile}")
+    print(f"mode: {mode}")
+    print(f"interval: {every_seconds}s")
+    print()
+
+    while True:
+        cycles += 1
+        cycle_start = time.time()
+
+        result = cmd_deliver(run_id, profile, mode=mode)
+
+        ok = result.get("ok", False)
+        hard_blocked = result.get("hard_blocked", False)
+        blocker = result.get("blocker")
+        next_action = result.get("next_action")
+
+        print(f"Cycle {cycles}")
+        print(f"status: {result.get('status', 'unknown')}")
+        print(f"ok: {ok}")
+        print(f"blocker: {blocker}")
+        print(f"next_action: {next_action}")
+
+        # Check stalled
+        stalled = _check_stalled_loop(run_id)
+        if stalled.get("hard_blocked"):
+            hard_blocked = True
+            print(f"stalled: true — same blocker repeated without progress")
+
+        if hard_blocked:
+            print(f"hard_blocked: true")
+            print(f"\nHARD_BLOCKED: {result.get('recommendation', blocker)}")
+            return 2
+
+        if ok:
+            print(f"\nDONE — deliver ok=true")
+            return 0
+
+        # Print instruction for agent
+        if next_action and next_action != "ask_human":
+            print(f"\nInstruction for agent:")
+            print(f"Continue. Do not summarize. {NEXT_ACTION_EXPLANATIONS.get(next_action, next_action)}")
+            print(f"Then rerun atm deliver --mode berserk")
+        else:
+            print(f"\nInstruction for agent:")
+            print(f"Run atm doctor --id {run_id} --profile {profile} --json for detailed diagnosis.")
+
+        # Wait for next cycle
+        elapsed = time.time() - cycle_start
+        sleep_time = max(1, every_seconds - int(elapsed))
+        print(f"\n(next check in {sleep_time}s)")
+        print()
+        time.sleep(sleep_time)
 
 

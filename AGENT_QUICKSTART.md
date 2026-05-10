@@ -197,3 +197,18 @@ REV
 atm deliver --id jira-fetch --profile technical-report
 # Expected: ok=true, status=technical_done
 ```
+
+## Berserk mode
+
+Prompt to any agent:
+
+```
+Read and follow:
+https://github.com/Wendigooor/agent-task-manager/blob/main/AGENT_BERSERK_PROMPT.md
+
+Feature:
+<feature description>
+
+Expected result:
+Do not stop until atm deliver --mode berserk returns ok=true, or until HARD_BLOCKED.
+```
