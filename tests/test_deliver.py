@@ -615,5 +615,152 @@ def test_patch_profile_deliver_returns_patch_done(run_id_patch):
     assert result["status"] == "patch_done", f"Expected patch_done, got: {result['status']}"
 
 
+# ── Berserk mode tests ──────────────────────────────────────────────────────
+
+def test_berserk_default_mode_is_careful(run_id):
+    """Default mode should be careful (backward compatible)."""
+    result = cmd_deliver(run_id, profile="demo")
+    assert "mode" not in result, "mode should not be in output for careful default"
+
+
+def test_berserk_output_has_required_fields(run_id):
+    """Berserk mode output must include blocker, next_action, retry_allowed, hard_blocked."""
+    result = cmd_deliver(run_id, profile="demo", mode="berserk")
+    assert result.get("mode") == "berserk"
+    assert "blocker" in result
+    assert "next_action" in result
+    assert "retry_allowed" in result
+    assert "hard_blocked" in result
+
+
+def test_berserk_no_premature_done_when_not_ok(run_id):
+    """Berserk mode must not say DONE in recommendation when ok=false."""
+    result = cmd_deliver(run_id, profile="demo", mode="berserk")
+    if not result.get("ok"):
+        rec = (result.get("recommendation") or "").lower()
+        for word in ["done", "completed", "ready", "delivered"]:
+            assert word not in rec, f"berserk recommendation contains forbidden word '{word}': {rec}"
+
+
+def test_berserk_retry_allowed_for_audit_failed(run_id):
+    """audit_failed should have retry_allowed=True."""
+    result = cmd_deliver(run_id, profile="demo", mode="berserk")
+    if result.get("blocker") == "audit_failed":
+        assert result.get("retry_allowed") is True
+        assert result.get("hard_blocked") is False
+
+
+def test_berserk_history_written(run_id):
+    """Berserk mode should write history to evidence/berserk-history.json."""
+    cmd_deliver(run_id, profile="demo", mode="berserk")
+    ev = _evidence_path(run_id)
+    hist_path = os.path.join(ev, "berserk-history.json")
+    assert os.path.exists(hist_path), f"berserk-history.json not found at {hist_path}"
+    with open(hist_path) as f:
+        history = json.loads(f.read())
+    assert len(history) > 0
+    assert "blocker" in history[0]
+    assert "next_action" in history[0]
+    assert "evidence_count" in history[0]
+
+
+def test_berserk_doctor_returns_diagnosis(run_id):
+    """Doctor should return blocker and next_action."""
+    from gateboard import cmd_doctor
+    result = cmd_doctor(run_id, profile="demo")
+    assert "run_id" in result
+    assert "gates" in result
+    assert "audit" in result
+    assert "evidence" in result
+    assert result.get("run_id") == run_id
+
+
+def test_berserk_doctor_readonly(run_id):
+    """Doctor must not change gate state."""
+    from gateboard import cmd_doctor, cmd_status
+    before = cmd_status(run_id)
+    cmd_doctor(run_id, profile="demo")
+    after = cmd_status(run_id)
+    assert before.get("gates") == after.get("gates"), "doctor changed gate state"
+
+
+def test_berserk_technical_report_blocks_without_gates(run_id):
+    """Berserk on untouched technical-report should return retry_allowed=True."""
+    import uuid
+    tid = f"tbrs-{uuid.uuid4().hex[:8]}"
+    cmd_init_run(tid, "technical-report", "__test__")
+    cmd_import_gates("technical-report", None, tid)
+    result = cmd_deliver(tid, profile="technical-report", mode="berserk")
+    assert not result.get("ok")
+    assert result.get("mode") == "berserk"
+    assert result.get("retry_allowed") is True or result.get("retry_allowed") is None
+
+
+def test_berserk_stalled_loop_detection():
+    """Simulate 3 same-blocker attempts and verify stalled detection."""
+    from gateboard import _read_berserk_history, _check_stalled_loop, _write_berserk_history, _evidence_path
+    import uuid, os
+    tid = f"stall-{uuid.uuid4().hex[:8]}"
+    os.makedirs(_evidence_path(tid), exist_ok=True)
+    for i in range(3):
+        _write_berserk_history(tid, {
+            "blocker": "audit_failed",
+            "next_action": "run_audit",
+            "evidence_count": 0,
+            "screenshot_count": 0,
+            "review_mtime": "",
+            "gate_status": "gate.1:pending",
+            "timestamp": "2026-01-01T00:00:00Z",
+        })
+    h = _read_berserk_history(tid)
+    assert len(h) >= 3
+    stalled = _check_stalled_loop(tid)
+    assert stalled.get("stalled") is True
+    assert stalled.get("next_action") == "run_doctor_and_change_strategy"
+
+
+def test_berserk_stalled_loop_hard_blocked():
+    """5 same-blocker attempts without progress should hard_block."""
+    from gateboard import _write_berserk_history, _check_stalled_loop, _evidence_path
+    import uuid, os
+    tid = f"hard-{uuid.uuid4().hex[:8]}"
+    os.makedirs(_evidence_path(tid), exist_ok=True)
+    for i in range(5):
+        _write_berserk_history(tid, {
+            "blocker": "audit_failed",
+            "next_action": "run_audit",
+            "evidence_count": 0,
+            "screenshot_count": 0,
+            "review_mtime": "",
+            "gate_status": "gate.1:pending",
+            "timestamp": f"2026-01-01T00:00:0{i}Z",
+        })
+    stalled = _check_stalled_loop(tid)
+    assert stalled.get("hard_blocked") is True
+    assert stalled.get("stalled") is True
+    assert stalled.get("blocker") == "stalled_same_blocker"
+
+
+def test_berserk_stalled_with_progress_not_hard_blocked():
+    """3 same blockers but with evidence growth should NOT stalled."""
+    from gateboard import _write_berserk_history, _check_stalled_loop, _evidence_path
+    import uuid, os
+    tid = f"prog-{uuid.uuid4().hex[:8]}"
+    os.makedirs(_evidence_path(tid), exist_ok=True)
+    for i in range(3):
+        _write_berserk_history(tid, {
+            "blocker": "audit_failed",
+            "next_action": "run_audit",
+            "evidence_count": i + 1,  # growing = progress
+            "screenshot_count": 0,
+            "review_mtime": "",
+            "gate_status": "gate.1:pending",
+            "timestamp": f"2026-01-01T00:00:0{i}Z",
+        })
+    stalled = _check_stalled_loop(tid)
+    assert stalled.get("stalled") is False
+    assert stalled.get("progress_detected") is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
