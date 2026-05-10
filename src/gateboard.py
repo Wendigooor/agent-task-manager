@@ -143,23 +143,49 @@ def cmd_import_gates(profile=None, file_path=None, run_id=None):
             return {"error": "No active run. Run init-run first."}
         run_id = runs[0][0]
 
-    default_demo = {
-        "gates": [
-            {"id": "gate.discovery.api", "title": "API and data contract probed before implementation", "severity": "critical", "kind": "manual"},
-            {"id": "gate.discovery.routes", "title": "Routes and navigation checked", "severity": "major", "kind": "manual"},
-            {"id": "gate.implementation.migration", "title": "Required migrations exist or schema change is not needed", "severity": "critical", "kind": "file_exists_or_note"},
-            {"id": "gate.build.production", "title": "Production build passes", "severity": "critical", "kind": "command", "command": "npm run build"},
-            {"id": "gate.typecheck", "title": "Typecheck passes", "severity": "critical", "kind": "command", "command": "npm run typecheck"},
-            {"id": "gate.e2e.demo", "title": "Demo E2E passes without swallowed failures", "severity": "critical", "kind": "command", "command": "npm run e2e"},
-            {"id": "gate.screenshots.desktop", "title": "Desktop screenshots exist and are non-empty", "severity": "critical", "kind": "screenshot_set", "min_count": 4, "min_size_kb": 80},
-            {"id": "gate.screenshots.mobile", "title": "Mobile screenshot exists", "severity": "critical", "kind": "screenshot_set", "min_count": 1, "min_size_kb": 60},
-            {"id": "gate.visual.review", "title": "Screenshots were opened and reviewed", "severity": "critical", "kind": "manual"},
-            {"id": "gate.evidence.package", "title": "Evidence package has required files", "severity": "critical", "kind": "file_exists", "paths": ["summary.md", "verdict.json", "changed-files.md", "artifacts.json", "demo-narrative.md", "e2e-report.json"]},
-            {"id": "gate.verdict.computed", "title": "Final verdict is computed by ATM", "severity": "critical", "kind": "composite"},
-        ]
+    BUILTIN_PROFILES = {
+        "demo": {
+            "gates": [
+                {"id": "gate.discovery.api", "title": "API and data contract probed before implementation", "severity": "critical", "kind": "manual"},
+                {"id": "gate.discovery.routes", "title": "Routes and navigation checked", "severity": "major", "kind": "manual"},
+                {"id": "gate.implementation.migration", "title": "Required migrations exist or schema change is not needed", "severity": "critical", "kind": "file_exists_or_note"},
+                {"id": "gate.build.production", "title": "Production build passes", "severity": "critical", "kind": "command", "command": "npm run build"},
+                {"id": "gate.typecheck", "title": "Typecheck passes", "severity": "critical", "kind": "command", "command": "npm run typecheck"},
+                {"id": "gate.e2e.demo", "title": "Demo E2E passes without swallowed failures", "severity": "critical", "kind": "command", "command": "npm run e2e"},
+                {"id": "gate.screenshots.desktop", "title": "Desktop screenshots exist and are non-empty", "severity": "critical", "kind": "screenshot_set", "min_count": 4, "min_size_kb": 80},
+                {"id": "gate.screenshots.mobile", "title": "Mobile screenshot exists", "severity": "critical", "kind": "screenshot_set", "min_count": 1, "min_size_kb": 60},
+                {"id": "gate.visual.review", "title": "Screenshots were opened and reviewed", "severity": "critical", "kind": "manual"},
+                {"id": "gate.evidence.package", "title": "Evidence package has required files", "severity": "critical", "kind": "file_exists", "paths": ["summary.md", "verdict.json", "changed-files.md", "artifacts.json", "demo-narrative.md", "e2e-report.json"]},
+                {"id": "gate.verdict.computed", "title": "Final verdict is computed by ATM", "severity": "critical", "kind": "composite"},
+            ]
+        },
+        "technical-report": {
+            "gates": [
+                {"id": "gate.discovery.api", "title": "API/data contract or input schema discovered", "severity": "critical", "kind": "manual"},
+                {"id": "gate.implementation.script_or_change", "title": "Script or code change implemented", "severity": "critical", "kind": "manual"},
+                {"id": "gate.smoke.command", "title": "Smoke command executed successfully", "severity": "critical", "kind": "command", "command": "echo 'override this smoke command'"},
+                {"id": "gate.evidence.package", "title": "Evidence package has required files", "severity": "critical", "kind": "file_exists", "paths": ["summary.md", "verdict.json", "changed-files.md", "artifacts.json"]},
+                {"id": "gate.review.artifact", "title": "Review artifact written with provenance", "severity": "critical", "kind": "manual"},
+                {"id": "gate.verdict.computed", "title": "Final verdict is computed by ATM", "severity": "critical", "kind": "composite"},
+            ]
+        },
+        "patch": {
+            "gates": [
+                {"id": "gate.implementation.patch", "title": "Code patch applied", "severity": "critical", "kind": "manual"},
+                {"id": "gate.smoke.command", "title": "Smoke command passes", "severity": "critical", "kind": "command", "command": "echo 'override this smoke command'"},
+                {"id": "gate.evidence.package", "title": "Evidence package has required files", "severity": "critical", "kind": "file_exists", "paths": ["summary.md", "changed-files.md"]},
+                {"id": "gate.review.artifact", "title": "Review artifact written with provenance", "severity": "critical", "kind": "manual"},
+                {"id": "gate.verdict.computed", "title": "Final verdict is computed by ATM", "severity": "critical", "kind": "composite"},
+            ]
+        },
     }
 
+    default_demo = BUILTIN_PROFILES.get("demo")
+
     gates = default_demo["gates"] if not file_path else _load_yaml_gates(file_path)
+    profile_name = profile or "demo"
+    if not file_path:
+        gates = BUILTIN_PROFILES.get(profile_name, BUILTIN_PROFILES["demo"])["gates"]
     imported = 0
     for g in gates:
         existing = conn.execute("SELECT id FROM gates WHERE run_id = ? AND id = ?", [run_id, g["id"]]).fetchone()
@@ -252,16 +278,63 @@ def cmd_pass(run_id, gate_id, evidence_path=None, note=None):
                     if kind == "file_exists":
                         return {"error": f"Required file '{p}' not found (checked {resolved} and {ev_fallback})"}
 
+    # ── CRITICAL: screenshot_set cannot be passed manually without real screenshots ──
+    if kind == "screenshot_set":
+        min_count = spec.get("min_count", 1)
+        min_size_kb = spec.get("min_size_kb", 60)
+
+        # Check evidence/screenshots/ directory for .png/.jpg files
+        ss_dir = os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence", "screenshots")
+        valid_files = []
+        if os.path.exists(ss_dir):
+            for f in os.listdir(ss_dir):
+                if f.lower().endswith((".png", ".jpg", ".jpeg")):
+                    fpath = os.path.join(ss_dir, f)
+                    size_kb = os.path.getsize(fpath) / 1024
+                    if size_kb >= min_size_kb:
+                        valid_files.append(fpath)
+
+        if len(valid_files) < min_count:
+            return {
+                "error": f"screenshot_set gate requires {min_count} valid screenshots (≥{min_size_kb}KB) in {ss_dir}. "
+                         f"Found: {len(valid_files)}. Cannot pass manually.",
+                "hint": "Create actual screenshots and place them in the evidence/screenshots/ directory."
+            }
+
+    # ── CRITICAL: visual.review cannot be passed with a note only ──
+    if gate_id and ("visual" in gate_id or gate_id == "gate.visual.review") and kind == "manual":
+        if not evidence_path:
+            # Check for visual-review artifact, waiver, or vision-review
+            ev_dir = os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence")
+            has_visual_artifact = any(
+                os.path.exists(os.path.join(ev_dir, f))
+                for f in ("visual-review.md", "vision-review.md", "visual-review-waiver.md")
+            )
+            if not has_visual_artifact:
+                return {
+                    "error": f"Gate '{gate_id}' requires evidence file (visual-review.md, vision-review.md, "
+                             f"or visual-review-waiver.md). Notes alone are not sufficient.",
+                    "hint": "Create a visual-review artifact or a waiver with explicit reason."
+                }
+
+    # ── CRITICAL: detect profile mismatch — demo profile used for non-visual tasks ──
+    if gate_id and gate_id == "gate.screenshots.desktop" and kind == "screenshot_set":
+        run = conn.execute("SELECT profile FROM runs WHERE id = ?", [run_id]).fetchone()
+        run_profile = run[0] if run else "demo"
+        if run_profile == "demo":
+            # Check if any screenshots exist at all
+            ss_dir = os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence", "screenshots")
+            ss_exist = os.path.exists(ss_dir) and any(f.endswith((".png", ".jpg", ".jpeg")) for f in os.listdir(ss_dir)) if os.path.exists(ss_dir) else False
+            if not ss_exist and note and "n/a" in note.lower():
+                # Warning: profile may be wrong
+                pass  # warning will be generated in cmd_audit
+
     # Resolve evidence path to absolute BEFORE storing
     if evidence_path and not os.path.isabs(evidence_path):
         evidence_path = os.path.abspath(evidence_path)
 
     if evidence_path and not os.path.exists(evidence_path):
         return {"error": f"Evidence file '{evidence_path}' not found"}
-
-    # Visual review gate requires file evidence, not just a note
-    if gate_id and "visual" in gate_id and not evidence_path and kind == "manual":
-        return {"error": f"Gate '{gate_id}' requires file evidence (screenshot or visual-review.md). Notes alone are not sufficient."}
 
     sha = _sha256(evidence_path) if evidence_path else None
     conn.execute("UPDATE gates SET status = 'passed', updated_at = ? WHERE run_id = ? AND id = ?", [now(), run_id, gate_id])
@@ -716,6 +789,208 @@ def cmd_audit(run_id=None, summary_path=None):
         if os.path.exists(p):
             details.append({"type": "service_file_exists", "detail": f"{sf} exists", "severity": "info"})
 
+    # 11. Typecheck command must look like typecheck, not smoke/feature script
+    typecheck_gate = gates.get("gate.typecheck", {})
+    if typecheck_gate and typecheck_gate.get("status") == "passed":
+        cmd_runs = conn.execute(
+            "SELECT command FROM command_runs WHERE run_id = ? AND gate_id = 'gate.typecheck' AND exit_code = 0 ORDER BY id DESC LIMIT 1",
+            [run_id]).fetchall()
+        if cmd_runs:
+            cmd_text = cmd_runs[0][0].lower()
+            # Known typecheck commands
+            typecheck_keywords = [
+                "tsc", "mypy", "pyright", "py_compile", "ruff check",
+                "npm run typecheck", "npm run lint", "npx tsc",
+                "flake8", "pylint", "eslint",
+            ]
+            looks_like_smoke = (
+                not any(kw in cmd_text for kw in typecheck_keywords)
+                and ("python3 " in cmd_text or "node " in cmd_text or ".py" in cmd_text or ".mjs" in cmd_text)
+                and ("fetch" in cmd_text or "report" in cmd_text or "script" in cmd_text)
+            )
+            if looks_like_smoke or ("echo" in cmd_text and "typecheck" not in cmd_text):
+                issues.append({
+                    "type": "typecheck_command_looks_like_smoke",
+                    "detail": f"gate.typecheck ran: {cmd_text[:120]}. This looks like a smoke/feature script, not a typecheck command.",
+                    "severity": "critical",
+                    "gate": "gate.typecheck",
+                })
+
+    # 12. No-op build detection
+    build_gate_audit = gates.get("gate.build.production", {})
+    if build_gate_audit and build_gate_audit.get("status") == "passed":
+        cmd_runs = conn.execute(
+            "SELECT command FROM command_runs WHERE run_id = ? AND gate_id = 'gate.build.production' AND exit_code = 0 ORDER BY id DESC LIMIT 1",
+            [run_id]).fetchall()
+        if cmd_runs:
+            cmd_text = cmd_runs[0][0].strip()
+            # Detect no-op: echo, true, :, printf ... without actual build tool
+            noop_patterns = [
+                "echo ", "printf ", "true", ": ",
+                "no-op", "noop", "no op",
+            ]
+            is_noop = any(cmd_text.startswith(p) or p == cmd_text.strip() or (p in cmd_text.lower() and len(cmd_text) < 30)
+                         for p in noop_patterns)
+            if is_noop:
+                # Check if build-not-applicable waiver exists
+                waiver_path = os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence", "build-not-applicable.md")
+                if not os.path.exists(waiver_path):
+                    issues.append({
+                        "type": "build_noop_command",
+                        "detail": f"gate.build.production ran no-op: '{cmd_text[:100]}'. Use explicit build waiver or correct profile.",
+                        "severity": "critical",
+                        "gate": "gate.build.production",
+                    })
+                else:
+                    details.append({
+                        "type": "build_waived",
+                        "detail": f"Build waived via {waiver_path}",
+                        "severity": "info",
+                    })
+
+    # 13. Screenshot gate integrity: passed but no screenshots
+    for gid, info in gates.items():
+        if info.get("kind") == "screenshot_set" and info.get("status") == "passed":
+            spec = info.get("spec", {})
+            min_count = spec.get("min_count", 1)
+            min_size_kb = spec.get("min_size_kb", 60)
+            ss_dir = os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence", "screenshots")
+            valid_ss = []
+            if os.path.exists(ss_dir):
+                for f in os.listdir(ss_dir):
+                    if f.lower().endswith((".png", ".jpg", ".jpeg")):
+                        fpath = os.path.join(ss_dir, f)
+                        if os.path.getsize(fpath) / 1024 >= min_size_kb:
+                            valid_ss.append(fpath)
+            if len(valid_ss) < min_count:
+                issues.append({
+                    "type": "screenshot_gate_passed_without_screenshots",
+                    "detail": f"gate {gid}: status=passed but only {len(valid_ss)} valid screenshots found (need ≥{min_count}, ≥{min_size_kb}KB). Evidence dir: {ss_dir}",
+                    "severity": "critical",
+                    "gate": gid,
+                })
+
+    # 14. Visual review gate: passed but no review artifact
+    visual_gate = gates.get("gate.visual.review", {})
+    if visual_gate and visual_gate.get("status") == "passed":
+        ev_dir = os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence")
+        has_visual_artifact = any(
+            os.path.exists(os.path.join(ev_dir, f))
+            for f in ("visual-review.md", "vision-review.md", "visual-review-waiver.md")
+        )
+        if not has_visual_artifact:
+            issues.append({
+                "type": "visual_review_passed_without_artifact",
+                "detail": "gate.visual.review status=passed but no visual-review.md, vision-review.md, or visual-review-waiver.md found in evidence/",
+                "severity": "critical",
+                "gate": "gate.visual.review",
+            })
+
+    # 15. Direct DB mutation detection
+    # Check: gates passed but no gate_events
+    for gid, info in gates.items():
+        if info.get("status") == "passed":
+            events = conn.execute(
+                "SELECT COUNT(*) FROM gate_events WHERE run_id = ? AND gate_id = ? AND event_type = 'passed'",
+                [run_id, gid]).fetchone()[0]
+            if events == 0:
+                issues.append({
+                    "type": "direct_db_mutation_suspected",
+                    "detail": f"gate {gid}: status=passed but no 'passed' event in gate_events. Direct DB mutation suspected.",
+                    "severity": "critical",
+                    "gate": gid,
+                })
+
+    # 16. Verdict in runs table but no verdicts table entry
+    run_verdict = conn.execute("SELECT verdict FROM runs WHERE id = ?", [run_id]).fetchone()
+    if run_verdict and run_verdict[0]:
+        ver_count = conn.execute("SELECT COUNT(*) FROM verdicts WHERE run_id = ?", [run_id]).fetchone()[0]
+        if ver_count == 0:
+            issues.append({
+                "type": "direct_db_mutation_suspected",
+                "detail": f"runs.verdict = '{run_verdict[0]}' but no entries in verdicts table. Direct DB mutation suspected.",
+                "severity": "critical",
+            })
+        # Also check if verdict was set but no gate_events about it
+        verdict_events = conn.execute(
+            "SELECT COUNT(*) FROM gate_events WHERE run_id = ? AND event_type LIKE '%verdict%'",
+            [run_id]).fetchone()[0]
+        if verdict_events == 0 and ver_count == 0:
+            issues.append({
+                "type": "direct_db_mutation_suspected",
+                "detail": f"runs.verdict set but no verdict events and no verdicts table entry.",
+                "severity": "critical",
+            })
+
+    # 17. Evidence files in project root (should be in agent/atm/runs/<run-id>/evidence/)
+    EVIDENCE_FILENAMES = (
+        "summary.md", "changed-files.md", "verdict.json", "artifacts.json",
+        "demo-narrative.md", "e2e-report.json", "reviewer-verdict.md",
+        "visual-review.md", "vision-review.md",
+    )
+    root_evidence_files = []
+    for fn in EVIDENCE_FILENAMES:
+        root_path = os.path.join(PROJECT_ROOT, fn)
+        if os.path.exists(root_path):
+            root_evidence_files.append(fn)
+    if root_evidence_files:
+        details.append({
+            "type": "evidence_files_in_project_root",
+            "detail": f"Evidence files found in project root: {', '.join(root_evidence_files)}. "
+                      f"They should be in agent/atm/runs/{run_id}/evidence/",
+            "severity": "major",
+        })
+
+    # 18. Profile mismatch: demo profile has visual gates but no screenshots
+    run = conn.execute("SELECT profile FROM runs WHERE id = ?", [run_id]).fetchone()
+    run_profile = run[0] if run else "demo"
+    if run_profile == "demo":
+        ss_gate = gates.get("gate.screenshots.desktop", {})
+        visual_gate_mismatch = gates.get("gate.visual.review", {})
+        has_screenshots = os.path.exists(
+            os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence", "screenshots"))
+        if has_screenshots:
+            try:
+                has_screenshots = any(f.endswith((".png", ".jpg", ".jpeg"))
+                                     for f in os.listdir(os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence", "screenshots")))
+            except:
+                has_screenshots = False
+        if not has_screenshots and (ss_gate.get("status") == "passed" or visual_gate_mismatch.get("status") == "passed"):
+            details.append({
+                "type": "profile_mismatch_possible",
+                "detail": f"demo profile used but no screenshots produced. "
+                          f"Consider using technical-report profile for non-visual tasks.",
+                "severity": "major",
+            })
+
+    # 19. Review metadata check — for reviewer-verdict artifact completeness
+    ev_dir = os.path.join(PROJECT_ROOT, "agent", "atm", "runs", run_id, "evidence")
+    for verdict_file in os.listdir(ev_dir) if os.path.exists(ev_dir) else []:
+        if "verdict" in verdict_file.lower() and verdict_file.endswith(".md"):
+            vpath = os.path.join(ev_dir, verdict_file)
+            try:
+                with open(vpath) as f:
+                    content = f.read()
+                reviewer_model = _parse_frontmatter_field(content, "reviewer_model")
+                executor_model = _parse_frontmatter_field(content, "executor_model")
+                review_mode = _parse_frontmatter_field(content, "review_mode")
+                if not reviewer_model and not executor_model:
+                    details.append({
+                        "type": "review_metadata_missing",
+                        "detail": f"{verdict_file} has no reviewer_model or executor_model in frontmatter. "
+                                  f"Review provenance unknown.",
+                        "severity": "major",
+                    })
+                elif reviewer_model == "unknown" or executor_model == "unknown" or (not review_mode and (not reviewer_model or not executor_model)):
+                    details.append({
+                        "type": "review_provenance_incomplete",
+                        "detail": f"{verdict_file}: reviewer_model={reviewer_model}, executor_model={executor_model}, "
+                                  f"review_mode={review_mode}. At minimum, reviewer_model and executor_model must be specified.",
+                        "severity": "major",
+                    })
+            except:
+                pass
+
     # Collect status
     critical_issues = [i for i in issues if i.get("severity") == "critical"]
     major_issues = [i for i in issues if i.get("severity") == "major"] + [i for i in details if i.get("severity") == "major"]
@@ -809,7 +1084,7 @@ def cmd_prepare_review(run_id):
     bg = _run_review_bundle_generator(run_id)
     steps.append({"step": "bundle-generator", "ok": bg.get("ran"), "detail": bg.get("output") or bg.get("reason") or bg.get("error", "unknown")})
 
-    # Step 4: Validate bundle manifest
+    # Step 4: Validate bundle manifest — check both text AND real files
     bundle_path = _review_bundle_path(run_id)
     manifest_path = os.path.join(bundle_path, "REVIEW_BUNDLE_MANIFEST.md")
     errors = []
@@ -818,14 +1093,59 @@ def cmd_prepare_review(run_id):
     if not os.path.exists(manifest_path):
         errors.append("REVIEW_BUNDLE_MANIFEST.md not found")
     else:
-        # Check for missing (❌) files in manifest
         with open(manifest_path) as f:
             content = f.read()
+
+        # Check for ❌ markers (text-based) — only fail on user-critical files
+        TOOL_GENERATED_FILES = {"atm-audit.txt", "atm-export.json", "active-profile.yaml"}
+        manifest_warnings = []
         missing_lines = [l.strip() for l in content.split("\n") if "❌" in l]
         if missing_lines:
             for ml in missing_lines:
-                errors.append(f"missing in bundle: {ml}")
-    steps.append({"step": "validate-manifest", "ok": len(errors) == 0, "detail": "; ".join(errors) if errors else "all files present"})
+                is_tool_gen = any(tf in ml for tf in TOOL_GENERATED_FILES)
+                if is_tool_gen:
+                    manifest_warnings.append(f"manifest: {ml} (tool-generated, non-blocking)")
+                else:
+                    errors.append(f"manifest says missing: {ml}")
+        # Merge manifest warnings into detail
+
+        # CRITICAL: Validate real files against manifest claims
+        # Parse manifest for claimed files and verify they exist
+        for line in content.split("\n"):
+            line_stripped = line.strip()
+            # Look for patterns like: "✅ filename" or "✅ filename (detail)"
+            if line_stripped.startswith("✅"):
+                # Extract filename (first word after ✅, stop at space or colon)
+                parts = line_stripped[1:].strip().split()
+                if parts:
+                    fname = parts[0].rstrip(":")
+                    # Resolve the file in bundle directory
+                    claimed_path = os.path.join(bundle_path, fname)
+                    if not os.path.exists(claimed_path):
+                        errors.append(f"manifest claims ✅ {fname} but file not found in bundle")
+            # Also look for "filename: ✅" pattern
+            elif ": ✅" in line_stripped or ":✅" in line_stripped:
+                fname = line_stripped.split(":")[0].strip().strip("`").strip("**").strip()
+                claimed_path = os.path.join(bundle_path, fname)
+                if fname and not os.path.exists(claimed_path):
+                    errors.append(f"manifest claims {fname}: ✅ but file not found in bundle")
+
+        # Verify critical files exist regardless of manifest claims
+        # Only contract.md and summary.md are hard-critical (user-generated, not tool-generated)
+        critical_bundle_files = ["contract.md", "summary.md"]
+        for cf in critical_bundle_files:
+            cf_path = os.path.join(bundle_path, cf)
+            if not os.path.exists(cf_path):
+                errors.append(f"critical bundle file missing: {cf}")
+        # atm-audit.txt and atm-export.json are tool-generated — warn if missing, don't fail
+        for nice_to_have in ["atm-audit.txt", "atm-export.json"]:
+            n_path = os.path.join(bundle_path, nice_to_have)
+            if not os.path.exists(n_path):
+                errors.append(f"bundle file missing (non-critical): {nice_to_have}")
+
+    steps.append({"step": "validate-manifest", "ok": len(errors) == 0,
+                  "detail": ("; ".join(errors) if errors else "all files present and verified") +
+                            (". Warnings: " + "; ".join(manifest_warnings) if manifest_warnings else "")})
 
     ok = all(s["ok"] for s in steps)
     return {
@@ -941,13 +1261,18 @@ def cmd_review_status(run_id):
     audit = cmd_audit(run_id)
     artifacts["audit-pass"] = audit.get("pass")
 
-    # Bundle manifest status
+    # Bundle manifest status — only block on user-critical ❌ markers
     manifest_path = os.path.join(bundle, "REVIEW_BUNDLE_MANIFEST.md")
     bundle_ok = False
+    TOOL_GEN = {"atm-audit.txt", "atm-export.json", "active-profile.yaml"}
     if os.path.exists(manifest_path):
         with open(manifest_path) as f:
             content = f.read()
-        bundle_ok = "❌" not in content
+        # Count ❌ lines excluding tool-generated files
+        missing_lines = [l for l in content.split("\n") if "❌" in l]
+        user_critical_missing = [l for l in missing_lines
+                                 if not any(tf in l for tf in TOOL_GEN)]
+        bundle_ok = len(user_critical_missing) == 0
     artifacts["bundle-complete"] = bundle_ok
 
     # Auto-assess completeness
@@ -1255,7 +1580,10 @@ def _classify_review_mode(parsed: dict) -> str:
     """Classify review quality from artifact metadata.
 
     Returns one of: cross_model, fresh_context_same_model, same_session_self_review,
-                    manual, skipped, unknown
+                    manual, skipped, missing, unknown_review_provenance
+
+    CRITICAL: unknown/unknown no longer infers 'manual'. It returns
+    'unknown_review_provenance' which blocks demo_done.
     """
     if not parsed.get("found"):
         return "missing"
@@ -1267,19 +1595,64 @@ def _classify_review_mode(parsed: dict) -> str:
         return explicit
 
     # Infer from models
-    executor = parsed.get("executor_model", "unknown")
-    reviewer = parsed.get("reviewer_model", "unknown")
+    executor = (parsed.get("executor_model") or "").strip().lower()
+    reviewer = (parsed.get("reviewer_model") or "").strip().lower()
 
-    if executor == "unknown" or reviewer == "unknown":
-        return "manual"  # Can't verify → treat as manual
+    # Unknown/unknown — cannot infer, must block
+    if (not executor or executor == "unknown") and (not reviewer or reviewer == "unknown"):
+        return "unknown_review_provenance"
 
-    # same model → fresh_context (not same_session unless explicitly declared)
+    # Only one side is known — weak provenance
+    if not executor or executor == "unknown" or not reviewer or reviewer == "unknown":
+        # If review_mode is explicitly 'manual', allow
+        if explicit == "manual":
+            return "manual"
+        return "unknown_review_provenance"
+
+    # Same model → fresh_context (not same_session unless explicitly declared)
     if executor == reviewer:
         return "fresh_context_same_model"
-    if executor.split("/")[-1] == reviewer.split("/")[-1]:
-        return "fresh_context_same_model"
+    if "/" in executor and "/" in reviewer:
+        if executor.split("/")[-1] == reviewer.split("/")[-1]:
+            return "fresh_context_same_model"
 
     return "cross_model"
+
+
+def _check_review_metadata_completeness(parsed: dict) -> dict:
+    """Check if review artifact has sufficient provenance metadata.
+
+    Returns dict with: has_frontmatter, has_reviewer_model, has_executor_model,
+    has_review_mode, has_reviewer_provider, has_executor_provider, all_fields_present.
+    """
+    fm = parsed.get("frontmatter", {})
+    reviewer_model = fm.get("reviewer_model") or parsed.get("reviewer_model", "")
+    executor_model = fm.get("executor_model") or parsed.get("executor_model", "")
+    review_mode = fm.get("review_mode") or parsed.get("review_mode", "")
+    reviewer_provider = fm.get("reviewer_provider") or parsed.get("reviewer_provider", "")
+    executor_provider = fm.get("executor_provider") or parsed.get("executor_provider", "")
+
+    has_frontmatter = bool(parsed.get("frontmatter", {}))
+    field_status = {
+        "has_reviewer_model": bool(reviewer_model and reviewer_model.lower() != "unknown"),
+        "has_executor_model": bool(executor_model and executor_model.lower() != "unknown"),
+        "has_review_mode": bool(review_mode),
+        "has_reviewer_provider": bool(reviewer_provider),
+        "has_executor_provider": bool(executor_provider),
+    }
+
+    all_fields_present = all([
+        field_status["has_reviewer_model"],
+        field_status["has_executor_model"],
+        field_status["has_review_mode"],
+    ])
+
+    return {
+        "has_frontmatter": has_frontmatter,
+        **field_status,
+        "all_fields_present": all_fields_present,
+        "missing_fields": [k for k, v in field_status.items() if not v],
+    }
 
 
 def _get_latest_review_artifact(run_id: str) -> dict:
@@ -1498,19 +1871,52 @@ def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None 
     if partial_outcome:
         # Skip quality check for explicit skip
         steps["review_quality"]["status"] = "skipped"
+    elif review_mode == "unknown_review_provenance":
+        errors.append("review_provenance_missing")
+        steps["review_quality"]["status"] = "fail"
+        warnings.append("review_provenance_missing: reviewer_model and/or executor_model unknown or missing from artifact frontmatter — cannot verify provenance")
     elif review_mode == "same_session_self_review":
         errors.append("same_session_self_review")
         steps["review_quality"]["status"] = "fail"
     elif review_mode == "fresh_context_same_model":
-        warnings.append("same_model_review_used: executor and reviewer are same model family — acceptable for demo_done with warning")
+        warnings.append("same_model_review_used: executor and reviewer are same model family — acceptable with warning")
         steps["review_quality"]["status"] = "warn"
     elif review_mode == "manual":
-        warnings.append("manual review recorded — accepted")
+        if profile in ("demo",):
+            warnings.append("manual review recorded — accepted with warning for demo profile")
+        else:
+            warnings.append("manual review recorded — not ideal for non-demo profile")
         steps["review_quality"]["status"] = "warn"
     elif review_mode == "cross_model":
         steps["review_quality"]["status"] = "pass"
     elif review_mode == "skipped":
         steps["review_quality"]["status"] = "skipped"
+    else:
+        # Unknown mode — treat cautiously
+        warnings.append(f"unknown review mode: '{review_mode}' — treating as warning")
+        steps["review_quality"]["status"] = "warn"
+
+    # ── Review metadata completeness check ────────────────────────────────
+    metadata_check = _check_review_metadata_completeness(review)
+    steps["review_metadata"] = {
+        "status": "pass" if metadata_check["all_fields_present"] else "warn",
+        "completeness": metadata_check,
+    }
+    if not partial_outcome and not metadata_check["all_fields_present"]:
+        if profile in ("demo",):
+            # demo profile: incomplete metadata blocks demo_done
+            errors.append("review_provenance_missing")
+            steps["review_metadata"]["status"] = "fail"
+            warnings.append(
+                f"review metadata incomplete: missing {', '.join(metadata_check['missing_fields'])}. "
+                f"demo profile requires full provenance for demo_done."
+            )
+        else:
+            # technical-report / patch: incomplete metadata is a warning but allows technical_done
+            warnings.append(
+                f"review metadata incomplete: missing {', '.join(metadata_check['missing_fields'])}. "
+                f"Acceptable for {profile} profile but limits to technical_done."
+            )
 
     # ── Step 6: Fix-response timestamp check ─────────────────────────────
     if partial_outcome:
@@ -1561,24 +1967,39 @@ def cmd_deliver(run_id: str, profile: str = "demo", reviewer_script: str | None 
     # ── Graded outcome ───────────────────────────────────────────────────
     ok = len(errors) == 0
 
+    # Profile-aware outcome naming
+    PROFILE_OUTCOME_MAP = {
+        "demo": "demo_done",
+        "technical-demo": "technical_demo_done",
+        "technical-report": "technical_done",
+        "patch": "patch_done",
+    }
+
     if partial_outcome:
         final_verdict = "technical_partial"
         recommendation = f"PARTIAL — review skipped: {skip_review_reason or 'no reason given'}"
     elif ok:
+        outcome_name = PROFILE_OUTCOME_MAP.get(profile, "demo_done")
+        final_verdict = outcome_name
         if review_mode == "cross_model":
-            final_verdict = "demo_done"
-            recommendation = "DONE — cross-model review passed"
+            recommendation = f"DONE ({outcome_name}) — cross-model review passed"
         elif review_mode == "fresh_context_same_model":
-            final_verdict = "demo_done"
-            recommendation = "DONE — same-model fresh-context review (consider cross-model for stronger claims)"
+            recommendation = f"DONE ({outcome_name}) — same-model fresh-context review (same family, different session)"
         elif review_mode == "manual":
-            final_verdict = "demo_done"
-            recommendation = "DONE — manual review"
+            recommendation = f"DONE ({outcome_name}) — manual review"
         else:
-            final_verdict = "demo_done"
-            recommendation = "DONE"
+            recommendation = f"DONE ({outcome_name})"
     elif errors:
-        final_verdict = errors[0]
+        # Check if this is a review_provenance_missing case
+        if "review_provenance_missing" in errors:
+            final_verdict = "review_provenance_missing"
+            if profile in ("demo",):
+                recommendation = "BLOCKED: review provenance missing — demo profile requires full reviewer metadata (reviewer_model, executor_model, review_mode)"
+            else:
+                final_verdict = "technical_partial"
+                recommendation = "PARTIAL: review provenance incomplete — acceptable for technical-report/patch but not for demo"
+        else:
+            final_verdict = errors[0]
         rec_map = {
             "audit_failed": "BLOCKED: audit failed — fix gate issues, re-run deliver",
             "review_bundle_incomplete": "BLOCKED: review bundle incomplete — run prepare-review first",
