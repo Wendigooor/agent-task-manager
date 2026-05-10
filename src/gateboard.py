@@ -1522,6 +1522,29 @@ def _berserk_analysis(audit, deliver_result: dict, run_id: str, profile: str) ->
             retry_allowed = False
             primary_error = "review_missing"
             next_action = "ask_human"
+
+    # Berserk demo: no screenshots → hard_blocked if not already caught
+    if profile == "demo" and not hard_blocked and primary_error != "screenshots_missing":
+        ss_dir = os.path.join(_evidence_path(run_id), "screenshots")
+        has_ss = (os.path.exists(ss_dir) and any(f.endswith((".png", ".jpg"))
+                 for f in os.listdir(ss_dir))) if os.path.exists(ss_dir) else False
+        if not has_ss:
+            # Check if there are screenshot_set gates imported
+            try:
+                conn = _ensure_db()
+                has_ss_gates = conn.execute(
+                    "SELECT COUNT(*) FROM gates WHERE run_id=? AND kind='screenshot_set'",
+                    [run_id]
+                ).fetchone()[0] > 0
+                conn.close()
+                if has_ss_gates:
+                    hard_blocked = True
+                    retry_allowed = False
+                    primary_error = "screenshots_missing"
+                    next_action = "add_screenshots"
+            except Exception:
+                pass
+
     return {"blocker": primary_error, "detail": BERSERK_BLOCKER_DIAG.get(primary_error, status),
             "next_action": next_action, "retry_allowed": retry_allowed, "hard_blocked": hard_blocked}
 
@@ -1544,35 +1567,55 @@ def _write_berserk_history(run_id: str, entry: dict):
     p = os.path.join(ev, "berserk-history.json")
     h = _read_berserk_history(run_id)
     h.append(entry)
-    with open(p, "w") as f:
-        json.dump(h[-50:], f, indent=2)
+    # Atomic write: tempfile + rename to avoid partial reads
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix="berserk-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(h[-50:], f, indent=2)
+        os.replace(tmp, p)
+    except Exception:
+        os.unlink(tmp)
+        raise
 
 
 def _check_stalled_loop(run_id: str) -> dict:
     h = _read_berserk_history(run_id)
     if len(h) < 3:
         return {"stalled": False, "hard_blocked": False}
-    last5 = h[-5:]
-    blockers = [e.get("blocker") for e in last5]
-    if len(blockers) < 3 or len(set(b for b in blockers if b)) != 1 or blockers[0] is None:
+
+    # Scan backwards from most recent entry, counting consecutive same blockers
+    latest_blocker = h[-1].get("blocker")
+    if not latest_blocker:
         return {"stalled": False, "hard_blocked": False}
-    first = last5[0]
-    latest = last5[-1]
-    has_progress = any(latest.get(k, 0) != first.get(k, 0) for k in ("evidence_count", "screenshot_count"))
-    has_progress = has_progress or latest.get("review_mtime", "") != first.get("review_mtime", "")
+
+    same_count = 0
+    for entry in reversed(h):
+        if entry.get("blocker") == latest_blocker:
+            same_count += 1
+        else:
+            break
+
+    # Check for progress across the relevant window
+    first_in_window = h[-same_count] if same_count <= len(h) else h[0]
+    latest = h[-1]
+    has_progress = any(latest.get(k, 0) != first_in_window.get(k, 0)
+                      for k in ("evidence_count", "screenshot_count"))
+    has_progress = has_progress or latest.get("review_mtime", "") != first_in_window.get("review_mtime", "")
+
     if has_progress:
         return {"stalled": False, "hard_blocked": False, "progress_detected": True}
-    same = sum(1 for b in blockers if b == blockers[0])
-    if same >= 5:
+
+    if same_count >= 5:
         return {"stalled": True, "hard_blocked": True, "blocker": "stalled_same_blocker",
-                "detail": f"Same blocker '{blockers[0]}' {same}x with no progress",
+                "detail": f"Same blocker '{latest_blocker}' {same_count}x with no progress",
                 "next_action": "ask_human",
-                "recommendation": f"Hard blocked: stalled on '{blockers[0]}' after {same} attempts, no progress."}
-    if same >= 3:
-        return {"stalled": True, "hard_blocked": False, "blocker": blockers[0],
-                "detail": f"Same blocker '{blockers[0]}' {same}x with no progress",
+                "recommendation": f"Hard blocked: stalled on '{latest_blocker}' after {same_count} attempts, no progress."}
+    if same_count >= 3:
+        return {"stalled": True, "hard_blocked": False, "blocker": latest_blocker,
+                "detail": f"Same blocker '{latest_blocker}' {same_count}x with no progress",
                 "next_action": "run_doctor_and_change_strategy",
-                "recommendation": f"Change strategy: blocked on '{blockers[0]}' for {same} attempts."}
+                "recommendation": f"Change strategy: blocked on '{latest_blocker}' for {same_count} attempts."}
     return {"stalled": False, "hard_blocked": False}
 
 
@@ -2245,133 +2288,161 @@ NEXT_ACTION_EXPLANATIONS = {
 
 def cmd_doctor(run_id: str = None, profile: str = "demo") -> dict:
     """Diagnose why deliver is blocked. Read-only, no state changes."""
-    if not run_id:
-        s = cmd_status()
-        if isinstance(s, dict):
-            run_id = s.get("run_id")
-    if not run_id:
-        return {"error": "No run ID provided or active"}
+    try:
+        if not run_id:
+            s = cmd_status()
+            if isinstance(s, dict):
+                run_id = s.get("run_id")
+        if not run_id:
+            return {"error": "No run ID provided or active"}
 
-    # Read-only snapshot
-    conn = _ensure_db()
-    run_row = conn.execute("SELECT id, profile, status, verdict FROM runs WHERE id = ?", [run_id]).fetchone()
-    if not run_row:
+        # Read-only snapshot
+        conn = _ensure_db()
+        run_row = conn.execute("SELECT id, profile, status, verdict FROM runs WHERE id = ?", [run_id]).fetchone()
+        if not run_row:
+            conn.close()
+            return {"error": f"Run '{run_id}' not found"}
+
+        gate_rows = conn.execute(
+            "SELECT id, kind, status, spec_json FROM gates WHERE run_id = ? ORDER BY id",
+            [run_id]
+        ).fetchall()
         conn.close()
-        return {"error": f"Run '{run_id}' not found"}
 
-    gate_rows = conn.execute(
-        "SELECT id, kind, status, spec_json FROM gates WHERE run_id = ? ORDER BY id",
-        [run_id]
-    ).fetchall()
-    conn.close()
+        # Collect gate statuses
+        gates = {"passed": 0, "failed": 0, "in_progress": 0, "pending": 0, "blocked": 0}
+        gates_detail = []
+        for g in gate_rows:
+            gid, kind, st, spec = g[0], g[1], g[2], g[3]
+            gates[st] = gates.get(st, 0) + 1
+            gates_detail.append({"id": gid, "kind": kind, "status": st})
 
-    # Collect gate statuses
-    gates = {"passed": 0, "failed": 0, "in_progress": 0, "pending": 0, "blocked": 0}
-    gates_detail = []
-    for g in gate_rows:
-        gid, kind, st, spec = g[0], g[1], g[2], g[3]
-        gates[st] = gates.get(st, 0) + 1
-        gates_detail.append({"id": gid, "kind": kind, "status": st})
+        # Run audit (read-only)
+        audit = cmd_audit(run_id)
 
-    # Run audit (read-only)
-    audit = cmd_audit(run_id)
+        # Check evidence
+        ev = _evidence_path(run_id)
+        screenshots_dir = os.path.join(ev, "screenshots") if ev else ""
+        evidence_files = []
+        if ev and os.path.exists(ev):
+            evidence_files = [f for f in os.listdir(ev) if os.path.isfile(os.path.join(ev, f))]
+        screenshot_files = []
+        if screenshots_dir and os.path.exists(screenshots_dir):
+            screenshot_files = [f for f in os.listdir(screenshots_dir) if f.endswith((".png", ".jpg"))]
 
-    # Check evidence
-    ev = _evidence_path(run_id)
-    screenshots_dir = os.path.join(ev, "screenshots") if ev else ""
-    evidence_files = []
-    if ev and os.path.exists(ev):
-        evidence_files = [f for f in os.listdir(ev) if os.path.isfile(os.path.join(ev, f))]
-    screenshot_files = []
-    if screenshots_dir and os.path.exists(screenshots_dir):
-        screenshot_files = [f for f in os.listdir(screenshots_dir) if f.endswith((".png", ".jpg"))]
+        # Find review artifacts
+        review_artifacts = []
+        if ev and os.path.exists(ev):
+            review_artifacts = [f for f in os.listdir(ev)
+                               if f.endswith(".md") and ("verdict" in f or "review" in f)]
 
-    # Find review artifacts
-    review_artifacts = []
-    if ev and os.path.exists(ev):
-        review_artifacts = [f for f in os.listdir(ev)
-                           if f.endswith(".md") and ("verdict" in f or "review" in f)]
+        # Determine blocker and next_action from audit + gate + evidence (read-only)
+        next_action = None
+        blocker = None
 
-    # Try a deliver to see what happens
-    deliver = cmd_deliver(run_id, profile, mode="berserk")
+        # From audit issues
+        if not audit.get("pass"):
+            for i in audit.get("issues", []):
+                if i.get("severity") == "critical":
+                    ctype = i.get("type", "")
+                    if "noop" in ctype:
+                        blocker = "build_noop"
+                    elif "typecheck" in ctype:
+                        blocker = "typecheck_pending"
+                    elif "screenshot" in ctype:
+                        blocker = "screenshots_missing"
+                    elif "visual" in ctype:
+                        blocker = "visual_review_missing"
+                    elif "evidence" in ctype:
+                        blocker = "evidence_missing"
+                    elif "profile" in ctype:
+                        blocker = "profile_mismatch"
+                    elif "verdict_contradiction" in ctype:
+                        blocker = "audit_failed"
+                    elif "root" in ctype:
+                        blocker = "evidence_in_root"
 
-    # Determine next_action
-    next_action = None
-    blocker = None
+        # From gate state (pending critical gates)
+        if not blocker:
+            for g in gates_detail:
+                if g["status"] in ("pending", "in_progress") and g["kind"] in ("command",):
+                    if "build" in g["id"]:
+                        blocker = "build_noop"
+                    elif "typecheck" in g["id"]:
+                        blocker = "typecheck_pending"
+                    elif "e2e" in g["id"]:
+                        blocker = "typecheck_pending"
+                    break
 
-    # From audit issues
-    if not audit.get("pass"):
-        for i in audit.get("issues", []):
-            if i.get("severity") == "critical":
-                ctype = i.get("type", "")
-                if "noop" in ctype:
-                    blocker = "build_noop"
-                elif "typecheck" in ctype:
-                    blocker = "typecheck_pending"
-                elif "screenshot" in ctype:
+        # From evidence state
+        if not blocker and screenshot_files and len(screenshot_files) < 4 and profile == "demo":
+            for g in gates_detail:
+                if g["kind"] == "screenshot_set" and g["status"] != "passed":
                     blocker = "screenshots_missing"
-                elif "visual" in ctype:
-                    blocker = "visual_review_missing"
-                elif "evidence" in ctype:
-                    blocker = "evidence_missing"
-                elif "profile" in ctype:
-                    blocker = "profile_mismatch"
+                    break
 
-    # From deliver errors
-    if not blocker and deliver.get("errors"):
-        for e in deliver["errors"]:
-            if e in BERSERK_BLOCKER_DIAG:
-                blocker = e
-                break
+        # From review artifacts
+        if not blocker and not review_artifacts:
+            if profile == "demo":
+                blocker = "review_missing"
+            else:
+                pass
 
-    if blocker:
-        next_action = BERSERK_NEXT_ACTIONS.get(blocker, "ask_human")
+        # Check bundle existence
+        bundle_dir = _review_bundle_path(run_id)
+        bundle_missing = not os.path.exists(os.path.join(bundle_dir, "REVIEW_BUNDLE_MANIFEST.md"))
+        if not blocker and bundle_missing:
+            blocker = "review_bundle_incomplete"
 
-    # Check berserk history for stalled loop
-    stalled = _check_stalled_loop(run_id)
+        # Derive next_action from blocker
+        if blocker:
+            next_action = BERSERK_NEXT_ACTIONS.get(blocker, "ask_human")
 
-    return {
-        "run_id": run_id,
-        "profile": profile,
-        "status": run_row[3] if run_row[3] else "active",
-        "gates": {
-            "total": len(gate_rows),
-            "passed": gates.get("passed", 0),
-            "failed": gates.get("failed", 0),
-            "in_progress": gates.get("in_progress", 0),
-            "pending": gates.get("pending", 0),
-            "blocked": gates.get("blocked", 0),
-        },
-        "gates_detail": gates_detail,
-        "audit": {
-            "pass": audit.get("pass", False),
-            "critical_issues": audit.get("critical_issues", 0),
-            "major_issues": audit.get("major_issues", 0),
-            "issues": audit.get("issues", []),
-        },
-        "evidence": {
-            "path": ev,
-            "files": evidence_files,
-            "count": len(evidence_files),
-            "screenshots": screenshot_files,
-            "screenshot_count": len(screenshot_files),
-        },
-        "review_artifacts": review_artifacts,
-        "deliver_preview": {
-            "ok": deliver.get("ok", False),
-            "status": deliver.get("status", "unknown"),
-            "errors": deliver.get("errors", []),
-            "blocker": deliver.get("blocker"),
-            "next_action": deliver.get("next_action"),
-            "blocker_detail": BERSERK_BLOCKER_DIAG.get(blocker or "", ""),
-        },
-        "blocker": blocker,
-        "next_action": next_action,
-        "next_action_detail": NEXT_ACTION_EXPLANATIONS.get(next_action or "", ""),
-        "stalled": stalled.get("stalled", False),
-        "hard_blocked": stalled.get("hard_blocked", False) or deliver.get("hard_blocked", False),
-        "recommendation": stalled.get("recommendation", deliver.get("recommendation", "")),
-    }
+        # Check berserk history for stalled loop
+        stalled = _check_stalled_loop(run_id)
+
+        return {
+            "run_id": run_id,
+            "profile": profile,
+            "status": run_row[3] if run_row[3] else "active",
+            "gates": {
+                "total": len(gate_rows),
+                "passed": gates.get("passed", 0),
+                "failed": gates.get("failed", 0),
+                "in_progress": gates.get("in_progress", 0),
+                "pending": gates.get("pending", 0),
+                "blocked": gates.get("blocked", 0),
+            },
+            "gates_detail": gates_detail,
+            "audit": {
+                "pass": audit.get("pass", False),
+                "critical_issues": audit.get("critical_issues", 0),
+                "major_issues": audit.get("major_issues", 0),
+                "issues": audit.get("issues", []),
+            },
+            "evidence": {
+                "path": ev,
+                "files": evidence_files,
+                "count": len(evidence_files),
+                "screenshots": screenshot_files,
+                "screenshot_count": len(screenshot_files),
+            },
+            "review_artifacts": review_artifacts,
+            "blocker": blocker,
+            "next_action": next_action,
+            "next_action_detail": NEXT_ACTION_EXPLANATIONS.get(next_action or "", ""),
+            "stalled": stalled.get("stalled", False),
+            "hard_blocked": stalled.get("hard_blocked", False),
+            "recommendation": stalled.get("recommendation", f"Next: {next_action or 'check gates'}"),
+        }
+    except Exception as e:
+        return {
+            "error": str(e),
+            "run_id": run_id or "unknown",
+            "blocker": "diagnostic_error",
+            "next_action": "ask_human",
+            "recommendation": f"Doctor failed: {e}",
+        }
 
 
 # ── Watch — Cron-like Delivery Loop ──────────────────────────────────────────
