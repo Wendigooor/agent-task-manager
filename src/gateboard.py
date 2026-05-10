@@ -1434,7 +1434,9 @@ def cmd_complete_review(run_id, vision_required=True):
     }
 
 
-# ── Deliver — Runtime-Owned Review Lifecycle ────────────────────────────────
+# ── Berserk Mode ─────────────────────────────────────────────────────────────
+
+BERSERK_HISTORY_FILE = "berserk-history.json"
 
 BERSERK_NEXT_ACTIONS = {
     "audit_failed": "run_audit",
@@ -1551,7 +1553,7 @@ def _berserk_analysis(audit, deliver_result: dict, run_id: str, profile: str) ->
 
 def _read_berserk_history(run_id: str) -> list:
     ev = _evidence_path(run_id)
-    p = os.path.join(ev, "berserk-history.json")
+    p = os.path.join(ev, BERSERK_HISTORY_FILE)
     if not os.path.exists(p):
         return []
     try:
@@ -1564,7 +1566,7 @@ def _read_berserk_history(run_id: str) -> list:
 def _write_berserk_history(run_id: str, entry: dict):
     ev = _evidence_path(run_id)
     os.makedirs(ev, exist_ok=True)
-    p = os.path.join(ev, "berserk-history.json")
+    p = os.path.join(ev, BERSERK_HISTORY_FILE)
     h = _read_berserk_history(run_id)
     h.append(entry)
     # Atomic write: tempfile + rename to avoid partial reads
@@ -1620,15 +1622,14 @@ def _check_stalled_loop(run_id: str) -> dict:
 
 
 def _berserk_snapshot(run_id: str) -> dict:
+    """Collect current state for berserk history entry.
+    
+    Collects gate status first (DB transaction), then filesystem state.
+    """
     ev = _evidence_path(run_id)
     ss_dir = os.path.join(ev, "screenshots")
-    ec = len([f for f in (os.listdir(ev) if os.path.exists(ev) else []) if os.path.isfile(os.path.join(ev, f))]) if os.path.exists(ev) else 0
-    sc = len([f for f in (os.listdir(ss_dir) if os.path.exists(ss_dir) else []) if f.endswith((".png", ".jpg"))]) if os.path.exists(ss_dir) else 0
-    rm = ""
-    if os.path.exists(ev):
-        mds = [os.path.join(ev, f) for f in os.listdir(ev) if f.endswith(".md") and ("verdict" in f or "review" in f)]
-        if mds:
-            rm = str(max(os.path.getmtime(m) for m in mds))
+    
+    # Gate status snapshot (DB first — more consistent)
     gs = ""
     try:
         conn = _ensure_db()
@@ -1637,6 +1638,17 @@ def _berserk_snapshot(run_id: str) -> dict:
         conn.close()
     except Exception:
         pass
+    
+    # Filesystem state (less critical for consistency)
+    ec = len([f for f in (os.listdir(ev) if os.path.exists(ev) else []) if os.path.isfile(os.path.join(ev, f))]) if os.path.exists(ev) else 0
+    sc = len([f for f in (os.listdir(ss_dir) if os.path.exists(ss_dir) else []) if f.endswith((".png", ".jpg"))]) if os.path.exists(ss_dir) else 0
+    
+    rm = ""
+    if os.path.exists(ev):
+        mds = [os.path.join(ev, f) for f in os.listdir(ev) if f.endswith(".md") and ("verdict" in f or "review" in f)]
+        if mds:
+            rm = str(max(os.path.getmtime(m) for m in mds))
+    
     return {"evidence_count": ec, "screenshot_count": sc, "review_mtime": rm, "gate_status": gs[:200]}
 
 DELIVER_FAIL_REASONS = {
@@ -2565,6 +2577,10 @@ def cmd_watch_cli(run_id: str, profile: str = "demo", every_seconds: int = 300,
         else:
             print(f"\nInstruction for agent:")
             print(f"Run atm doctor --id {run_id} --profile {profile} --json for detailed diagnosis.")
+
+        # Flush stdout so parent process can read progress
+        import sys as _sys
+        _sys.stdout.flush()
 
         # Wait for next cycle
         elapsed = time.time() - cycle_start

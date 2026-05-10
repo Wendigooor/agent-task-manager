@@ -92,7 +92,7 @@ def main():
     _add_json(sp)
 
     # watch
-    sp = sub.add_parser("watch", help="Watchdog mode — run deliver in a loop")
+    sp = sub.add_parser("watch", help="Watchdog mode — run deliver in a loop. Exit codes: 0 = deliver ok, 2 = hard blocked")
     _add_json(sp); _add_id(sp)
     sp.add_argument("--profile", default="demo")
     sp.add_argument("--every", type=int, default=300, help="Seconds between checks")
