@@ -103,8 +103,8 @@ src/
 tests/test_gateboard.py   # 32 unit tests
 tests/test_cli.py          # 14 CLI command tests
 tests/test_audit_cli.py    # 8 audit contradiction tests
-tests/test_deliver.py      # 20+ deliver + anti-cheat tests
-Total: 74+ tests, 0 failures expected.
+tests/test_deliver.py      # 35 deliver + anti-cheat tests
+Total: 81+ tests.
 bin/atm                 # CLI wrapper
 ```
 
