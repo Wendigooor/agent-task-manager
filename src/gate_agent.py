@@ -85,7 +85,7 @@ def main():
     sp.add_argument("--reviewer-script", help="Path to external reviewer script to run")
     sp.add_argument("--skip-review", action="store_true", help="Skip review (requires --skip-review-reason)")
     sp.add_argument("--skip-review-reason", help="Accepted risk reason for skipping review")
-    sp.add_argument("--mode", default="careful", choices=["careful", "berserk"], help="Delivery mode: careful (stop on partial) or berserk (never stop unless done)")
+    sp.add_argument("--mode", default="berserk", choices=["careful", "berserk"], help="Delivery mode: careful (stop on partial) or berserk (never stop unless done). Default: berserk")
 
     # init-project
     sp = sub.add_parser("init-project", help="Initialize ATM project in current directory")
