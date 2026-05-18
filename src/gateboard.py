@@ -1088,6 +1088,7 @@ def cmd_prepare_review(run_id):
     bundle_path = _review_bundle_path(run_id)
     manifest_path = os.path.join(bundle_path, "REVIEW_BUNDLE_MANIFEST.md")
     errors = []
+    manifest_warnings = []
     if not os.path.exists(bundle_path):
         errors.append("review-bundle directory not found")
     if not os.path.exists(manifest_path):
